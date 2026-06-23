@@ -1,0 +1,172 @@
+"""
+Outside-world providers: GoHighLevel (GHL) calendar + CRM, and SMS.
+
+Each has an interface and a fake in-memory version for offline tests. The real
+GHL integration is hidden behind the same simple shape so the rest of the code
+doesn't care which calendar is used. The brain only ever talks to the interface.
+"""
+from __future__ import annotations
+import datetime as dt
+from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo
+
+
+# ---------- Calendar ----------
+
+@dataclass
+class Slot:
+    start: dt.datetime           # local (clinic timezone), for matching + speaking
+    duration_min: int = 30
+    iso_utc: str | None = None   # original ISO string from the provider, used to book
+
+
+class CalendarProvider:
+    def availability(self, day: dt.date, service: str) -> list[Slot]:
+        raise NotImplementedError
+
+    def book(self, slot: Slot, name: str, phone: str, service: str) -> str:
+        """Return a confirmation id."""
+        raise NotImplementedError
+
+
+class InMemoryCalendar(CalendarProvider):
+    """Fake calendar (open 9-17, 30-min slots). Used when no GHL keys are set."""
+
+    def __init__(self) -> None:
+        self.bookings: list[dict] = []
+        self._taken: set[dt.datetime] = set()
+
+    def availability(self, day: dt.date, service: str) -> list[Slot]:
+        if day.weekday() == 6:  # Sunday closed
+            return []
+        slots = []
+        for hour in range(9, 17):
+            for minute in (0, 30):
+                start = dt.datetime.combine(day, dt.time(hour, minute))
+                if start not in self._taken:
+                    slots.append(Slot(start))
+        return slots
+
+    def book(self, slot: Slot, name: str, phone: str, service: str) -> str:
+        self._taken.add(slot.start)
+        conf = f"INMEM{1000 + len(self.bookings) + 1}"
+        self.bookings.append({"id": conf, "start": slot.start, "name": name,
+                              "phone": phone, "service": service})
+        return conf
+
+
+class GHLCalendar(CalendarProvider):
+    """
+    Real GoHighLevel (LeadConnector) v2 integration.
+
+      availability -> GET  /calendars/{calendarId}/free-slots
+      book         -> POST /contacts/upsert  (find/create the patient in the CRM)
+                      then POST /calendars/events/appointments
+
+    Auth: a Private Integration token (Bearer) + the 'Version: 2021-07-28' header.
+    Free slots come back as a map keyed by date (YYYY-MM-DD), each with a 'slots'
+    list of ISO datetimes in the requested timezone.
+
+    `client` is any object exposing .get(url, headers, params) and
+    .post(url, headers, json) returning a response with .status_code, .json()
+    and .text — i.e. an httpx.Client, or a fake for tests.
+    """
+
+    BASE = "https://services.leadconnectorhq.com"
+    VERSION = "2021-07-28"
+
+    def __init__(self, token: str, location_id: str, calendar_id: str,
+                 timezone: str = "America/Indiana/Indianapolis",
+                 slot_minutes: int = 30, client=None) -> None:
+        self.token = token
+        self.location_id = location_id
+        self.calendar_id = calendar_id
+        self.timezone = timezone
+        self.slot_minutes = slot_minutes
+        if client is None:
+            import httpx
+            client = httpx.Client(timeout=12.0)
+        self.client = client
+
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}",
+                "Version": self.VERSION,
+                "Content-Type": "application/json",
+                "Accept": "application/json"}
+
+    def availability(self, day: dt.date, service: str) -> list[Slot]:
+        tz = ZoneInfo(self.timezone)
+        start_ms = int(dt.datetime.combine(day, dt.time(0, 0), tz).timestamp() * 1000)
+        end_ms = int(dt.datetime.combine(day, dt.time(23, 59), tz).timestamp() * 1000)
+        resp = self.client.get(
+            f"{self.BASE}/calendars/{self.calendar_id}/free-slots",
+            headers=self._headers(),
+            params={"startDate": start_ms, "endDate": end_ms, "timezone": self.timezone},
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json() or {}
+        out: list[Slot] = []
+        for key, value in data.items():
+            if not (len(key) == 10 and key[4] == "-"):   # only YYYY-MM-DD keys
+                continue
+            for iso in (value.get("slots", []) if isinstance(value, dict) else []):
+                start = dt.datetime.fromisoformat(iso)
+                out.append(Slot(start=start, duration_min=self.slot_minutes, iso_utc=iso))
+        out.sort(key=lambda s: s.start)
+        return out
+
+    def _upsert_contact(self, name: str, phone: str) -> str | None:
+        first, _, last = (name or "").partition(" ")
+        body = {"locationId": self.location_id, "firstName": first or name,
+                "lastName": last, "name": name, "phone": phone}
+        resp = self.client.post(f"{self.BASE}/contacts/upsert",
+                                headers=self._headers(), json=body)
+        if resp.status_code not in (200, 201):
+            return None
+        d = resp.json() or {}
+        return (d.get("contact") or {}).get("id") or d.get("id")
+
+    def book(self, slot: Slot, name: str, phone: str, service: str) -> str:
+        contact_id = self._upsert_contact(name, phone)
+        start_iso = slot.iso_utc or slot.start.isoformat()
+        end_iso = (slot.start + dt.timedelta(minutes=self.slot_minutes)).isoformat()
+        body = {
+            "calendarId": self.calendar_id,
+            "locationId": self.location_id,
+            "contactId": contact_id,
+            "startTime": start_iso,
+            "endTime": end_iso,
+            "title": f"{service} - {name}",
+            "appointmentStatus": "confirmed",
+        }
+        resp = self.client.post(f"{self.BASE}/calendars/events/appointments",
+                                headers=self._headers(), json=body)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"GHL booking failed: {resp.status_code} {resp.text}")
+        d = resp.json() or {}
+        return str(d.get("id") or (d.get("appointment") or {}).get("id") or "BOOKED")
+
+
+# ---------- SMS (optional; GHL can also send its own confirmations) ----------
+
+@dataclass
+class SmsProvider:
+    sent: list[dict] = field(default_factory=list)
+
+    def send(self, to: str, body: str) -> None:
+        self.sent.append({"to": to, "body": body})
+
+
+class TwilioSms(SmsProvider):
+    def __init__(self, account_sid: str, auth_token: str, from_number: str) -> None:
+        super().__init__()
+        self.account_sid = account_sid
+        self.auth_token = auth_token
+        self.from_number = from_number
+
+    def send(self, to: str, body: str) -> None:
+        from twilio.rest import Client
+        Client(self.account_sid, self.auth_token).messages.create(
+            to=to, from_=self.from_number, body=body)
+        self.sent.append({"to": to, "body": body})
