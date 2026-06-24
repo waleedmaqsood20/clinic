@@ -16,6 +16,9 @@ DATABASE_URL it stores data in a local SQLite file.
 from __future__ import annotations
 import os
 import json
+import logging
+
+logger = logging.getLogger("clinic")
 
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -69,6 +72,7 @@ async def retell_function(request: Request):
     raw = await request.body()
     security.verify_retell_request(raw, request.headers.get("x-retell-signature"))
     body = json.loads(raw or b"{}")
+    logger.info("Retell function payload: %s", body)
     result = handle_function_call(body, executor)
     return JSONResponse(content=result)      # Retell hands this string to the agent
 

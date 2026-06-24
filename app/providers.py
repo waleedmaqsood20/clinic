@@ -116,15 +116,26 @@ class GHLCalendar(CalendarProvider):
         out.sort(key=lambda s: s.start)
         return out
 
-    def _upsert_contact(self, name: str, phone: str) -> str | None:
+    @staticmethod
+    def _to_e164(phone: str) -> str | None:
+        """Normalise to E.164 (+1XXXXXXXXXX for US). Returns None if not parseable."""
         import re
+        digits = re.sub(r"\D", "", phone or "")
+        if len(digits) == 10:
+            return f"+1{digits}"          # bare 10-digit US number
+        if len(digits) == 11 and digits.startswith("1"):
+            return f"+{digits}"           # 1XXXXXXXXXX already has country code
+        if phone.startswith("+") and len(digits) >= 8:
+            return f"+{digits}"           # already has + prefix
+        return None
+
+    def _upsert_contact(self, name: str, phone: str) -> str | None:
         first, _, last = (name or "").partition(" ")
         body: dict = {"locationId": self.location_id, "firstName": first or name,
-                      "lastName": last, "name": name}
-        # Include phone only if it looks like a real number (not the chat-mode placeholder)
-        digits = re.sub(r"[^\d+]", "", phone or "")
-        if len(digits) >= 8 and not digits.startswith("+10000000000"):
-            body["phone"] = digits if digits.startswith("+") else "+" + digits
+                      "lastName": last or first, "name": name}
+        e164 = self._to_e164(phone or "")
+        if e164 and not e164.startswith("+10000000000"):
+            body["phone"] = e164
         resp = self.client.post(f"{self.BASE}/contacts/upsert",
                                 headers=self._headers(), json=body)
         if resp.status_code not in (200, 201):
