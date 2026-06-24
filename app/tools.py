@@ -156,18 +156,36 @@ class ToolExecutor:
 
 
 # ---------- the function Retell talks to ----------
+def _infer_function(body: dict) -> tuple[str, dict]:
+    """
+    Retell sends args flat (no wrapping name/args/call envelope).
+    Infer which function was called from which args are present.
+    Strip Retell metadata keys to get clean args.
+    """
+    meta = {"tool_call_id", "execution_message", "call"}
+    args = {k: v for k, v in body.items() if k not in meta}
+    if "query" in args:
+        return "lookup_faq", args
+    if "time" in args or "day" in args and "name" in args:
+        return "book_appointment", args
+    if "day" in args:
+        return "check_availability", args
+    # fallback: old nested format
+    fn_name = body.get("name", "")
+    return fn_name, body.get("args") or {}
+
+
 def handle_function_call(body: dict, executor: ToolExecutor) -> str:
     """
-    Retell sends ONE custom-function call: {name, args, call}. We run it and
-    return a single result string, which Retell hands back to the agent.
+    Retell sends ONE custom-function call. Newer Retell LLM sends args flat
+    (no name/args/call envelope). We infer the function from which args exist.
     """
-    name = body.get("name")
-    args = body.get("args") or {}
     call = body.get("call") or {}
     caller = call.get("from_number") or "+10000000000"
     call_id = call.get("call_id")
+    fn_name, args = _infer_function(body)
     try:
-        out = executor.execute(name, args, caller, call_id)
+        out = executor.execute(fn_name, args, caller, call_id)
     except Exception as e:
         out = f"Sorry, something went wrong: {e}"
     return str(out).replace("\n", " ").strip()
