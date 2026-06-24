@@ -117,15 +117,14 @@ class GHLCalendar(CalendarProvider):
         return out
 
     def _upsert_contact(self, name: str, phone: str) -> str | None:
+        import re
         first, _, last = (name or "").partition(" ")
         body: dict = {"locationId": self.location_id, "firstName": first or name,
                       "lastName": last, "name": name}
-        # Only include phone if it looks real (not the chat-mode placeholder)
-        if phone and not phone.startswith("+10000000000"):
-            body["phone"] = phone
-        if not body.get("phone"):
-            # GHL requires phone or email — skip upsert if we have neither
-            return None
+        # Include phone only if it looks like a real number (not the chat-mode placeholder)
+        digits = re.sub(r"[^\d+]", "", phone or "")
+        if len(digits) >= 8 and not digits.startswith("+10000000000"):
+            body["phone"] = digits if digits.startswith("+") else "+" + digits
         resp = self.client.post(f"{self.BASE}/contacts/upsert",
                                 headers=self._headers(), json=body)
         if resp.status_code not in (200, 201):
@@ -135,18 +134,27 @@ class GHLCalendar(CalendarProvider):
 
     def book(self, slot: Slot, name: str, phone: str, service: str) -> str:
         contact_id = self._upsert_contact(name, phone)
-        start_iso = slot.iso_utc or slot.start.isoformat()
-        end_iso = (slot.start + dt.timedelta(minutes=self.slot_minutes)).isoformat()
+        if not contact_id:
+            raise RuntimeError("Could not create GHL contact — no contactId available.")
+        tz = ZoneInfo(self.timezone)
+        if slot.iso_utc:
+            start_dt = dt.datetime.fromisoformat(slot.iso_utc)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=tz)
+        else:
+            start_dt = slot.start.replace(tzinfo=tz) if slot.start.tzinfo is None else slot.start
+        end_dt = start_dt + dt.timedelta(minutes=self.slot_minutes)
+        start_iso = start_dt.isoformat()
+        end_iso = end_dt.isoformat()
         body: dict = {
             "calendarId": self.calendar_id,
             "locationId": self.location_id,
+            "contactId": contact_id,
             "startTime": start_iso,
             "endTime": end_iso,
             "title": f"{service} - {name}",
             "appointmentStatus": "confirmed",
         }
-        if contact_id:
-            body["contactId"] = contact_id
         resp = self.client.post(f"{self.BASE}/calendars/events/appointments",
                                 headers=self._headers(), json=body)
         if resp.status_code not in (200, 201):
