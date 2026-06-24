@@ -16,20 +16,26 @@ from __future__ import annotations
 import os
 import sys
 import json
+import datetime
 
 from app import knowledge
 
 RETELL_API = "https://api.retellai.com"
 FUNCTION_URL = os.getenv("RETELL_FUNCTION_URL", "https://YOUR-HOST/retell/function")
 WEBHOOK_URL = os.getenv("RETELL_WEBHOOK_URL", "https://YOUR-HOST/retell/webhook")
-MODEL = os.getenv("RETELL_MODEL", "claude-3.5-haiku")   # pick a current Retell model
+MODEL = os.getenv("RETELL_MODEL", "claude-4.5-haiku")
 VOICE_ID = os.getenv("RETELL_VOICE_ID", "11labs-Adrian")
 CLINIC = knowledge.CLINIC_PROFILE
+
+_TODAY = datetime.date.today().strftime("%A, %B %d, %Y")
 
 SYSTEM = f"""You are the phone receptionist for {CLINIC['name']}, a dental and \
 aesthetic clinic in Indianapolis, Indiana (US Eastern Time). You're on a live \
 phone call, so keep replies short, warm and natural — one or two sentences, never \
 lists.
+
+Today's date is {_TODAY}. Always use this year when converting caller-mentioned \
+dates to YYYY-MM-DD. Never book dates in the past.
 
 How to behave:
 - Treat every caller as a new patient. Politely get their full name and the reason \
