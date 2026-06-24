@@ -84,7 +84,8 @@ TOOLS = [
            "time": {"type": "string", "description": "e.g. '10am' or '14:30'"},
            "name": {"type": "string"},
            "service": {"type": "string"},
-           "reason": {"type": "string", "description": "reason for visit"}},
+           "reason": {"type": "string", "description": "reason for visit"},
+           "phone": {"type": "string", "description": "caller's phone number if they provided one"}},
           ["day", "time", "name", "service"]),
 ]
 

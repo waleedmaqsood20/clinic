@@ -118,8 +118,14 @@ class GHLCalendar(CalendarProvider):
 
     def _upsert_contact(self, name: str, phone: str) -> str | None:
         first, _, last = (name or "").partition(" ")
-        body = {"locationId": self.location_id, "firstName": first or name,
-                "lastName": last, "name": name, "phone": phone}
+        body: dict = {"locationId": self.location_id, "firstName": first or name,
+                      "lastName": last, "name": name}
+        # Only include phone if it looks real (not the chat-mode placeholder)
+        if phone and not phone.startswith("+10000000000"):
+            body["phone"] = phone
+        if not body.get("phone"):
+            # GHL requires phone or email — skip upsert if we have neither
+            return None
         resp = self.client.post(f"{self.BASE}/contacts/upsert",
                                 headers=self._headers(), json=body)
         if resp.status_code not in (200, 201):
@@ -131,15 +137,16 @@ class GHLCalendar(CalendarProvider):
         contact_id = self._upsert_contact(name, phone)
         start_iso = slot.iso_utc or slot.start.isoformat()
         end_iso = (slot.start + dt.timedelta(minutes=self.slot_minutes)).isoformat()
-        body = {
+        body: dict = {
             "calendarId": self.calendar_id,
             "locationId": self.location_id,
-            "contactId": contact_id,
             "startTime": start_iso,
             "endTime": end_iso,
             "title": f"{service} - {name}",
             "appointmentStatus": "confirmed",
         }
+        if contact_id:
+            body["contactId"] = contact_id
         resp = self.client.post(f"{self.BASE}/calendars/events/appointments",
                                 headers=self._headers(), json=body)
         if resp.status_code not in (200, 201):

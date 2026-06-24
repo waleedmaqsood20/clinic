@@ -97,10 +97,11 @@ class ToolExecutor:
         if name == "check_availability":
             return self._availability(args.get("day", ""), args.get("service", "exam"))
         if name == "book_appointment":
+            phone = args.get("phone") or caller_phone
             return self._book(args.get("day", ""), args.get("time", ""),
                               args.get("name", "the caller"),
                               args.get("service", "exam"),
-                              args.get("reason", ""), caller_phone, call_id)
+                              args.get("reason", ""), phone, call_id)
         return f"Unknown tool {name}."
 
     def _faq(self, query: str) -> str:
