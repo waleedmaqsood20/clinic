@@ -130,12 +130,13 @@ class GHLCalendar(CalendarProvider):
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"GHL contact upsert failed {resp.status_code}: {resp.text}")
         d = resp.json() or {}
-        return (d.get("contact") or {}).get("id") or d.get("id")
+        contact_id = (d.get("contact") or {}).get("id") or d.get("id")
+        if not contact_id:
+            raise RuntimeError(f"GHL contact upsert returned no id. Response: {d}")
+        return contact_id
 
     def book(self, slot: Slot, name: str, phone: str, service: str) -> str:
         contact_id = self._upsert_contact(name, phone)
-        if not contact_id:
-            raise RuntimeError("Could not create GHL contact — no contactId available.")
         tz = ZoneInfo(self.timezone)
         if slot.iso_utc:
             start_dt = dt.datetime.fromisoformat(slot.iso_utc)
@@ -158,7 +159,7 @@ class GHLCalendar(CalendarProvider):
         resp = self.client.post(f"{self.BASE}/calendars/events/appointments",
                                 headers=self._headers(), json=body)
         if resp.status_code not in (200, 201):
-            raise RuntimeError(f"GHL booking failed: {resp.status_code} {resp.text}")
+            raise RuntimeError(f"GHL booking failed: {resp.status_code} {resp.text} | payload sent: {body}")
         d = resp.json() or {}
         return str(d.get("id") or (d.get("appointment") or {}).get("id") or "BOOKED")
 
