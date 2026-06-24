@@ -23,6 +23,18 @@ from .providers import CalendarProvider, SmsProvider, Slot
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
 
+def _fmt_day(d: dt.date) -> str:
+    """'Tuesday Jun 16' — no leading zero, cross-platform (avoids %-d on Windows)."""
+    return f"{d.strftime('%A %b')} {d.day}"
+
+
+def _fmt_time(t: dt.datetime) -> str:
+    """'10am' or '2:30pm' — no leading zero, cross-platform (avoids %-I on Windows)."""
+    hour = t.hour % 12 or 12
+    ap = "am" if t.hour < 12 else "pm"
+    return f"{hour}:{t.minute:02d}{ap}" if t.minute else f"{hour}{ap}"
+
+
 def _parse_day(day_str: str) -> dt.date:
     s = (day_str or "").strip().lower()
     try:
@@ -102,9 +114,9 @@ class ToolExecutor:
         day = _parse_day(day_str)
         slots = self.calendar.availability(day, service)
         if not slots:
-            return f"No availability on {day.strftime('%A %b %-d')}. Offer another day."
-        times = ", ".join(s.start.strftime("%-I:%M%p").lower() for s in slots[:6])
-        return f"Available on {day.strftime('%A %b %-d')}: {times}."
+            return f"No availability on {_fmt_day(day)}. Offer another day."
+        times = ", ".join(_fmt_time(s.start) for s in slots[:6])
+        return f"Available on {_fmt_day(day)}: {times}."
 
     def _book(self, day_str: str, time_str: str, name: str, service: str,
               reason: str, caller_phone: str, call_id) -> str:
@@ -114,8 +126,7 @@ class ToolExecutor:
         if not slot:
             return "That time isn't available — offer the caller another slot."
         conf = self.calendar.book(slot, name, caller_phone, service)
-        when = (slot.start.strftime("%A %b %-d at %-I:%M%p")
-                .replace("AM", "am").replace("PM", "pm"))
+        when = f"{_fmt_day(slot.start)} at {_fmt_time(slot.start)}"
 
         if self.session_factory:
             try:

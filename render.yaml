@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: clinic-ai-receptionist
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHONIOENCODING
+        value: utf-8
+      - key: RETELL_API_KEY
+        sync: false
+      - key: RETELL_FUNCTION_URL
+        sync: false
+      - key: RETELL_WEBHOOK_URL
+        sync: false
+      - key: RETELL_MODEL
+        value: claude-3.5-haiku
+      - key: RETELL_VOICE_ID
+        value: 11labs-Adrian
+      - key: GHL_API_TOKEN
+        sync: false
+      - key: GHL_LOCATION_ID
+        sync: false
+      - key: GHL_CALENDAR_ID
+        sync: false
+      - key: GHL_SLOT_MINUTES
+        value: "30"
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: PHONE_HASH_HMAC_KEY
+        sync: false
+      - key: DASHBOARD_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CLINIC_TZ
+        value: America/Indiana/Indianapolis
