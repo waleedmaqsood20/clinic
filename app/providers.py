@@ -128,7 +128,7 @@ class GHLCalendar(CalendarProvider):
         resp = self.client.post(f"{self.BASE}/contacts/upsert",
                                 headers=self._headers(), json=body)
         if resp.status_code not in (200, 201):
-            return None
+            raise RuntimeError(f"GHL contact upsert failed {resp.status_code}: {resp.text}")
         d = resp.json() or {}
         return (d.get("contact") or {}).get("id") or d.get("id")
 
