@@ -148,12 +148,12 @@ class GHLCalendar(CalendarProvider):
         end_iso = end_dt.isoformat()
         body: dict = {
             "calendarId": self.calendar_id,
-            "locationId": self.location_id,
             "contactId": contact_id,
             "startTime": start_iso,
             "endTime": end_iso,
-            "title": f"{service} - {name}",
             "appointmentStatus": "confirmed",
+            "title": f"{service} - {name}",
+            "toNotify": True,
         }
         resp = self.client.post(f"{self.BASE}/calendars/events/appointments",
                                 headers=self._headers(), json=body)
