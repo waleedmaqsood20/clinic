@@ -72,9 +72,7 @@ async def retell_function(request: Request):
     raw = await request.body()
     security.verify_retell_request(raw, request.headers.get("x-retell-signature"))
     body = json.loads(raw or b"{}")
-    print(f"[RETELL] payload: {body}", flush=True)
     result = handle_function_call(body, executor)
-    print(f"[RETELL] result: {result}", flush=True)
     return JSONResponse(content=result)      # Retell hands this string to the agent
 
 
