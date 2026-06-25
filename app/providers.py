@@ -131,8 +131,9 @@ class GHLCalendar(CalendarProvider):
 
     def _upsert_contact(self, name: str, phone: str) -> str | None:
         first, _, last = (name or "").partition(" ")
-        body: dict = {"locationId": self.location_id, "firstName": first or name,
-                      "lastName": last or first, "name": name}
+        body: dict = {"locationId": self.location_id,
+                      "firstName": first or name,
+                      "lastName": last or first}
         e164 = self._to_e164(phone or "")
         if e164 and not e164.startswith("+10000000000"):
             body["phone"] = e164
@@ -156,21 +157,22 @@ class GHLCalendar(CalendarProvider):
         else:
             start_dt = slot.start.replace(tzinfo=tz) if slot.start.tzinfo is None else slot.start
         end_dt = start_dt + dt.timedelta(minutes=self.slot_minutes)
+        # GHL requires numeric timezone offset (e.g. -04:00), not Z
         start_iso = start_dt.isoformat()
         end_iso = end_dt.isoformat()
         body: dict = {
             "calendarId": self.calendar_id,
+            "locationId": self.location_id,   # required per GHL official schema
             "contactId": contact_id,
             "startTime": start_iso,
             "endTime": end_iso,
             "appointmentStatus": "confirmed",
             "title": f"{service} - {name}",
-            "toNotify": True,
         }
         resp = self.client.post(f"{self.BASE}/calendars/events/appointments",
                                 headers=self._headers(), json=body)
         if resp.status_code not in (200, 201):
-            raise RuntimeError(f"GHL booking failed: {resp.status_code} {resp.text} | payload sent: {body}")
+            raise RuntimeError(f"GHL booking failed: {resp.status_code} {resp.text} | payload: {body}")
         d = resp.json() or {}
         return str(d.get("id") or (d.get("appointment") or {}).get("id") or "BOOKED")
 
