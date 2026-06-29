@@ -168,7 +168,14 @@ class ToolExecutor:
         if result == "no_appointment":
             return (f"I don't see any upcoming appointments for {name}. "
                     "Is it possible it was booked under a different number?")
-        return (f"Done, {name} — your appointment has been cancelled. "
+        title = (result.get("title") or "appointment").split(" - ")[0].strip()
+        raw = result.get("startTime") or result.get("start_time") or ""
+        try:
+            start_dt = dt.datetime.fromisoformat(raw)
+            when = f"{_fmt_day(start_dt.date())} at {_fmt_time(start_dt)}"
+        except (ValueError, TypeError):
+            when = "the scheduled time"
+        return (f"Done, {name} — your {title} on {when} has been cancelled. "
                 "We hope to see you again soon.")
 
     def _reschedule(self, name: str, day_str: str, time_str: str,

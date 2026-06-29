@@ -195,7 +195,7 @@ class GHLCalendar(CalendarProvider):
         upcoming.sort(key=lambda x: x[0])
         return upcoming[0][1]
 
-    def cancel(self, caller_phone: str) -> str:
+    def cancel(self, caller_phone: str) -> str | dict:
         contact_id = self._find_contact_by_phone(caller_phone)
         if not contact_id:
             return "no_contact"
@@ -209,7 +209,7 @@ class GHLCalendar(CalendarProvider):
         )
         if resp.status_code not in (200, 201, 204):
             raise RuntimeError(f"GHL cancel failed {resp.status_code}: {resp.text}")
-        return appt_id
+        return appt  # full dict so caller gets title + startTime in response
 
     def reschedule(self, caller_phone: str, new_slot: Slot) -> str:
         contact_id = self._find_contact_by_phone(caller_phone)
