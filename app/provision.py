@@ -146,25 +146,25 @@ def main() -> int:
         resp = httpx.patch(f"{RETELL_API}/update-retell-llm/{llm_id}",
                            headers=headers, json=llm_payload, timeout=30.0)
         if resp.status_code not in (200, 201):
-            print(f"❌ Update LLM failed {resp.status_code}: {resp.text}")
+            print(f"[FAIL] Update LLM failed {resp.status_code}: {resp.text}")
             return 1
-        print(f"✅ Retell LLM {llm_id} updated with new tools and prompt.")
+        print(f"[OK] Retell LLM {llm_id} updated with new tools and prompt.")
         return 0
 
     llm = httpx.post(f"{RETELL_API}/create-retell-llm", headers=headers,
                      json=llm_payload, timeout=30.0)
     if llm.status_code not in (200, 201):
-        print(f"❌ Create LLM failed {llm.status_code}: {llm.text}")
+        print(f"[FAIL] Create LLM failed {llm.status_code}: {llm.text}")
         return 1
     llm_id = llm.json().get("llm_id")
-    print(f"✅ Retell LLM created. llm_id: {llm_id}")
+    print(f"[OK] Retell LLM created. llm_id: {llm_id}")
 
     agent = httpx.post(f"{RETELL_API}/create-agent", headers=headers,
                        json=build_agent_payload(llm_id), timeout=30.0)
     if agent.status_code not in (200, 201):
-        print(f"❌ Create agent failed {agent.status_code}: {agent.text}")
+        print(f"[FAIL] Create agent failed {agent.status_code}: {agent.text}")
         return 1
-    print(f"✅ Agent created. agent_id: {agent.json().get('agent_id')}")
+    print(f"[OK] Agent created. agent_id: {agent.json().get('agent_id')}")
     print("Next: in Retell, attach a phone number to this agent.")
     return 0
 
