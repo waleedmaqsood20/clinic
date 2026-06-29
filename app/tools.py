@@ -102,6 +102,12 @@ class ToolExecutor:
                               args.get("name", "the caller"),
                               args.get("service", "exam"),
                               args.get("reason", ""), phone, call_id)
+        if name == "cancel_appointment":
+            return self._cancel(args.get("name", "the caller"), caller_phone)
+        if name == "reschedule_appointment":
+            return self._reschedule(args.get("name", "the caller"),
+                                    args.get("new_day", ""), args.get("new_time", ""),
+                                    args.get("service", ""), caller_phone)
         return f"Unknown tool {name}."
 
     def _faq(self, query: str) -> str:
@@ -154,6 +160,33 @@ class ToolExecutor:
             note = ""
         return f"Booked {service} for {name} on {when}. Confirmation {conf}. {note}".strip()
 
+    def _cancel(self, name: str, caller_phone: str) -> str:
+        result = self.calendar.cancel(caller_phone)
+        if result == "no_contact":
+            return ("I couldn't find a record for this number. "
+                    "Could you confirm the phone number you booked with?")
+        if result == "no_appointment":
+            return (f"I don't see any upcoming appointments for {name}. "
+                    "Is it possible it was booked under a different number?")
+        return (f"Done, {name} — your appointment has been cancelled. "
+                "We hope to see you again soon.")
+
+    def _reschedule(self, name: str, day_str: str, time_str: str,
+                    service: str, caller_phone: str) -> str:
+        day = _parse_day(day_str)
+        slots = self.calendar.availability(day, service or "exam")
+        slot = _match_time(slots, time_str)
+        if not slot:
+            return "That time isn't available — offer the caller another slot."
+        result = self.calendar.reschedule(caller_phone, slot)
+        if result == "no_contact":
+            return "I couldn't find a patient record for this number."
+        if result == "no_appointment":
+            return (f"I don't see any upcoming appointments for {name}. "
+                    "Is it possible it was booked under a different number?")
+        when = f"{_fmt_day(slot.start)} at {_fmt_time(slot.start)}"
+        return f"Done, {name} — your appointment has been moved to {when}."
+
 
 # ---------- the function Retell talks to ----------
 def _infer_function(body: dict) -> tuple[str, dict]:
@@ -166,10 +199,14 @@ def _infer_function(body: dict) -> tuple[str, dict]:
     args = {k: v for k, v in body.items() if k not in meta}
     if "query" in args:
         return "lookup_faq", args
-    if "time" in args or "day" in args and "name" in args:
+    if "new_day" in args or "new_time" in args:
+        return "reschedule_appointment", args
+    if "time" in args or ("day" in args and "name" in args):
         return "book_appointment", args
     if "day" in args:
         return "check_availability", args
+    if "name" in args:
+        return "cancel_appointment", args
     # fallback: old nested format
     fn_name = body.get("name", "")
     return fn_name, body.get("args") or {}
