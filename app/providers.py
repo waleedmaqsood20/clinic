@@ -28,6 +28,14 @@ class CalendarProvider:
         """Return a confirmation id."""
         raise NotImplementedError
 
+    def cancel(self, caller_phone: str) -> str:
+        """Cancel next upcoming appointment. Returns appointment id, 'no_contact', or 'no_appointment'."""
+        return "no_appointment"
+
+    def reschedule(self, caller_phone: str, new_slot: Slot) -> str:
+        """Move next upcoming appointment to new_slot. Returns appointment id or error sentinel."""
+        return "no_appointment"
+
 
 class InMemoryCalendar(CalendarProvider):
     """Fake calendar (open 9-17, 30-min slots). Used when no GHL keys are set."""
@@ -146,6 +154,87 @@ class GHLCalendar(CalendarProvider):
         if not contact_id:
             raise RuntimeError(f"GHL contact upsert returned no id. Response: {d}")
         return contact_id
+
+    def _find_contact_by_phone(self, phone: str) -> str | None:
+        e164 = self._to_e164(phone or "")
+        if not e164:
+            return None
+        resp = self.client.get(
+            f"{self.BASE}/contacts/search/duplicate",
+            headers=self._headers(),
+            params={"locationId": self.location_id, "phone": e164},
+        )
+        if resp.status_code != 200:
+            return None
+        d = resp.json() or {}
+        return (d.get("contact") or {}).get("id") or d.get("id")
+
+    def _get_upcoming_appointment(self, contact_id: str) -> dict | None:
+        resp = self.client.get(
+            f"{self.BASE}/contacts/{contact_id}/appointments",
+            headers=self._headers(),
+        )
+        if resp.status_code != 200:
+            return None
+        body = resp.json() or {}
+        appts = body if isinstance(body, list) else body.get("appointments") or []
+        now = dt.datetime.now(dt.timezone.utc)
+        upcoming = []
+        for a in appts:
+            raw = a.get("startTime") or a.get("start_time") or ""
+            try:
+                s = dt.datetime.fromisoformat(raw)
+                if s.tzinfo is None:
+                    s = s.replace(tzinfo=dt.timezone.utc)
+                if s > now:
+                    upcoming.append((s, a))
+            except ValueError:
+                pass
+        if not upcoming:
+            return None
+        upcoming.sort(key=lambda x: x[0])
+        return upcoming[0][1]
+
+    def cancel(self, caller_phone: str) -> str:
+        contact_id = self._find_contact_by_phone(caller_phone)
+        if not contact_id:
+            return "no_contact"
+        appt = self._get_upcoming_appointment(contact_id)
+        if not appt:
+            return "no_appointment"
+        appt_id = appt.get("id", "")
+        resp = self.client.delete(
+            f"{self.BASE}/calendars/events/appointments/{appt_id}",
+            headers=self._headers(),
+        )
+        if resp.status_code not in (200, 201, 204):
+            raise RuntimeError(f"GHL cancel failed {resp.status_code}: {resp.text}")
+        return appt_id
+
+    def reschedule(self, caller_phone: str, new_slot: Slot) -> str:
+        contact_id = self._find_contact_by_phone(caller_phone)
+        if not contact_id:
+            return "no_contact"
+        appt = self._get_upcoming_appointment(contact_id)
+        if not appt:
+            return "no_appointment"
+        appt_id = appt.get("id", "")
+        tz = ZoneInfo(self.timezone)
+        start_dt = (new_slot.start.replace(tzinfo=tz)
+                    if new_slot.start.tzinfo is None else new_slot.start)
+        end_dt = start_dt + dt.timedelta(minutes=self.slot_minutes)
+        body: dict = {
+            "startTime": start_dt.isoformat(),
+            "endTime": end_dt.isoformat(),
+            "appointmentStatus": "confirmed",
+        }
+        resp = self.client.put(
+            f"{self.BASE}/calendars/events/appointments/{appt_id}",
+            headers=self._headers(), json=body,
+        )
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"GHL reschedule failed {resp.status_code}: {resp.text}")
+        return appt_id
 
     def book(self, slot: Slot, name: str, phone: str, service: str) -> str:
         contact_id = self._upsert_contact(name, phone)

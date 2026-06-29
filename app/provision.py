@@ -38,14 +38,16 @@ Today's date is {_TODAY}. Always use this year when converting caller-mentioned 
 dates to YYYY-MM-DD. Never book dates in the past.
 
 How to behave:
-- Treat every caller as a new patient. Politely get their full name and the reason \
-for their visit so we can prepare for the appointment.
 - For any question about hours, prices, services, location, or insurance, use \
 lookup_faq and answer from what it gives you. Never make these up.
-- When the caller wants to come in, use check_availability for the right day, then \
-offer the times it returns.
-- Once they pick a time and you have their name, use book_appointment (day as \
-YYYY-MM-DD, plus time, name, service, and reason), then confirm it back clearly.
+- When the caller wants to book, get their full name and reason for visit, use \
+check_availability for the right day, offer the times returned, then use \
+book_appointment (day as YYYY-MM-DD, plus time, name, service, reason) and confirm.
+- When the caller wants to cancel, confirm their name and use cancel_appointment. \
+The system looks them up by the number they are calling from.
+- When the caller wants to reschedule, confirm their name and preferred new day and \
+time, check availability first, then use reschedule_appointment with new_day \
+(YYYY-MM-DD), new_time, and name. The system moves their existing booking.
 - You are NOT a clinician. Do not give medical or dental advice — for clinical \
 questions, offer to have a dentist or team member follow up.
 - This call may be recorded to support the caller's care; if they ask, confirm that. \
@@ -87,6 +89,17 @@ TOOLS = [
            "reason": {"type": "string", "description": "reason for visit"},
            "phone": {"type": "string", "description": "caller's phone number if they provided one"}},
           ["day", "time", "name", "service"]),
+    _tool("cancel_appointment",
+          "Cancel the caller's next upcoming appointment. The system finds it by the caller's phone number.",
+          {"name": {"type": "string", "description": "Patient's full name to confirm identity"}},
+          ["name"]),
+    _tool("reschedule_appointment",
+          "Move the caller's existing appointment to a new date and time.",
+          {"name": {"type": "string"},
+           "new_day": {"type": "string", "description": "New date as YYYY-MM-DD"},
+           "new_time": {"type": "string", "description": "New time e.g. '10am' or '14:30'"},
+           "service": {"type": "string", "description": "service type if known"}},
+          ["name", "new_day", "new_time"]),
 ]
 
 
@@ -123,6 +136,21 @@ def main() -> int:
     import httpx
     headers = {"Authorization": f"Bearer {os.environ['RETELL_API_KEY']}",
                "Content-Type": "application/json"}
+
+    if "--update-llm" in sys.argv:
+        idx = sys.argv.index("--update-llm")
+        if idx + 1 >= len(sys.argv):
+            print("Usage: python -m app.provision --update-llm <llm_id>")
+            return 1
+        llm_id = sys.argv[idx + 1]
+        resp = httpx.patch(f"{RETELL_API}/update-retell-llm/{llm_id}",
+                           headers=headers, json=llm_payload, timeout=30.0)
+        if resp.status_code not in (200, 201):
+            print(f"❌ Update LLM failed {resp.status_code}: {resp.text}")
+            return 1
+        print(f"✅ Retell LLM {llm_id} updated with new tools and prompt.")
+        return 0
+
     llm = httpx.post(f"{RETELL_API}/create-retell-llm", headers=headers,
                      json=llm_payload, timeout=30.0)
     if llm.status_code not in (200, 201):
