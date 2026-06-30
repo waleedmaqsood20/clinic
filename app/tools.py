@@ -236,6 +236,9 @@ def handle_function_call(body: dict, executor: ToolExecutor) -> str:
     fn_name, args = _infer_function(body)
     try:
         out = executor.execute(fn_name, args, caller, call_id)
+    except RuntimeError as e:
+        logger.error("[RETELL] tool %s error: %s", fn_name, e)
+        out = str(e)
     except Exception:
         logger.exception("[RETELL] tool %s failed", fn_name)
         out = ("I'm having a little trouble with that right now. "
