@@ -164,9 +164,9 @@ class GHLCalendar(CalendarProvider):
         if not e164:
             return None
         r = self.client.get(
-            f"{self.BASE}/contacts/search",
+            f"{self.BASE}/contacts/",
             headers=self._headers(),
-            params={"locationId": self.location_id, "query": e164, "pageSize": 5},
+            params={"locationId": self.location_id, "query": e164, "limit": 5},
         )
         if r.status_code == 404:
             return None
