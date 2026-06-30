@@ -198,25 +198,28 @@ class ToolExecutor:
 # ---------- the function Retell talks to ----------
 def _infer_function(body: dict) -> tuple[str, dict]:
     """
-    Retell sends args flat (no wrapping name/args/call envelope).
-    Infer which function was called from which args are present.
-    Strip Retell metadata keys to get clean args.
+    Retell sends {name: "fn_name", args: {...}, call: {...}}.
+    Use name/args directly when present; fall back to flat-arg inference.
     """
-    meta = {"tool_call_id", "execution_message", "call"}
-    args = {k: v for k, v in body.items() if k not in meta}
-    if "query" in args:
-        return "lookup_faq", args
-    if "new_day" in args or "new_time" in args:
-        return "reschedule_appointment", args
-    if "time" in args or ("day" in args and "name" in args):
-        return "book_appointment", args
-    if "day" in args:
-        return "check_availability", args
-    if "name" in args:
-        return "cancel_appointment", args
-    # fallback: old nested format
     fn_name = body.get("name", "")
-    return fn_name, body.get("args") or {}
+    nested_args = body.get("args")
+    if fn_name and isinstance(nested_args, dict):
+        return fn_name, nested_args
+
+    # Flat format fallback: infer function from which keys are present
+    meta = {"tool_call_id", "execution_message", "call", "name", "args"}
+    flat = {k: v for k, v in body.items() if k not in meta}
+    if "query" in flat:
+        return "lookup_faq", flat
+    if "new_day" in flat or "new_time" in flat:
+        return "reschedule_appointment", flat
+    if "time" in flat or ("day" in flat and "name" in flat):
+        return "book_appointment", flat
+    if "day" in flat:
+        return "check_availability", flat
+    if "name" in flat:
+        return "cancel_appointment", flat
+    return fn_name or "unknown", flat
 
 
 def handle_function_call(body: dict, executor: ToolExecutor) -> str:
