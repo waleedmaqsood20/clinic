@@ -11,8 +11,11 @@ derived from the disconnection reason.
 """
 from __future__ import annotations
 import datetime as dt
+import logging
 
 from . import crypto, repository
+
+logger = logging.getLogger("clinic")
 
 
 def _outcome(call: dict, booked: bool) -> str:
@@ -25,10 +28,19 @@ def _outcome(call: dict, booked: bool) -> str:
 
 
 def persist_from_retell(session_factory, call: dict, analyzed: bool) -> None:
+    try:
+        _do_persist(session_factory, call, analyzed)
+    except Exception:
+        logger.exception("[RETELL] persist_from_retell failed for call %s", call.get("call_id"))
+
+
+def _do_persist(session_factory, call: dict, analyzed: bool) -> None:
     call_id = call.get("call_id")
     number = call.get("from_number") or ""
     start, end = call.get("start_timestamp"), call.get("end_timestamp")
     duration = int((end - start) / 1000) if (start and end) else None
+    ended_at = (dt.datetime.fromtimestamp(end / 1000, tz=dt.timezone.utc)
+                if end else dt.datetime.now(dt.timezone.utc))
     analysis = call.get("call_analysis") or {}
     cost = (call.get("call_cost") or {}).get("combined_cost")
 
@@ -49,7 +61,7 @@ def persist_from_retell(session_factory, call: dict, analyzed: bool) -> None:
             transcript_enc=crypto.encrypt(call.get("transcript")),
             recording_ref=call.get("recording_url"),
             cost_usd=cost,
-            ended_at=dt.datetime.now(dt.timezone.utc),
+            ended_at=ended_at,
         )
         repository.write_audit(session, actor="voice_ai", action="call.recorded",
                                call_id=call_id, phi=True,

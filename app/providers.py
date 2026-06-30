@@ -7,8 +7,11 @@ doesn't care which calendar is used. The brain only ever talks to the interface.
 """
 from __future__ import annotations
 import datetime as dt
+import logging
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger("clinic")
 
 
 # ---------- Calendar ----------
@@ -112,6 +115,7 @@ class GHLCalendar(CalendarProvider):
             params={"startDate": start_ms, "endDate": end_ms, "timezone": self.timezone},
         )
         if resp.status_code != 200:
+            logger.error("GHL free-slots failed %s: %s", resp.status_code, resp.text[:200])
             return []
         data = resp.json() or {}
         out: list[Slot] = []
@@ -247,10 +251,17 @@ class GHLCalendar(CalendarProvider):
             return "no_appointment"
         appt_id = appt.get("id", "")
         tz = ZoneInfo(self.timezone)
-        start_dt = (new_slot.start.replace(tzinfo=tz)
-                    if new_slot.start.tzinfo is None else new_slot.start)
+        if new_slot.iso_utc:
+            start_dt = dt.datetime.fromisoformat(new_slot.iso_utc)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=tz)
+        else:
+            start_dt = (new_slot.start.replace(tzinfo=tz)
+                        if new_slot.start.tzinfo is None else new_slot.start)
         end_dt = start_dt + dt.timedelta(minutes=self.slot_minutes)
         body: dict = {
+            "calendarId": self.calendar_id,
+            "locationId": self.location_id,
             "startTime": start_dt.isoformat(),
             "endTime": end_dt.isoformat(),
             "appointmentStatus": "confirmed",

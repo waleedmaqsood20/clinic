@@ -38,7 +38,7 @@ def write_audit(session, *, actor: str, action: str, call_id: str | None = None,
 def booking_exists_for_call(session, call_id: str | None) -> bool:
     if not call_id:
         return False
-    return session.query(Appointment).filter_by(call_id=call_id).count() > 0
+    return session.query(Appointment).filter_by(call_id=call_id).first() is not None
 
 
 def upsert_call(session, *, call_id: str, **fields) -> Call:

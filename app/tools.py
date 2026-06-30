@@ -11,12 +11,15 @@ phone (from caller ID), and reason for visit, and persist bookings + an audit
 record. There is no patient lookup yet (that's Stage 2).
 """
 from __future__ import annotations
+import logging
 import re
 import datetime as dt
 from zoneinfo import ZoneInfo
 
 from . import knowledge
 from .providers import CalendarProvider, SmsProvider, Slot
+
+logger = logging.getLogger("clinic")
 
 
 # ---------- small date/time helpers ----------
@@ -233,6 +236,8 @@ def handle_function_call(body: dict, executor: ToolExecutor) -> str:
     fn_name, args = _infer_function(body)
     try:
         out = executor.execute(fn_name, args, caller, call_id)
-    except Exception as e:
-        out = f"Sorry, something went wrong: {e}"
+    except Exception:
+        logger.exception("[RETELL] tool %s failed", fn_name)
+        out = ("I'm having a little trouble with that right now. "
+               "I'll make sure someone from our team follows up with you shortly.")
     return str(out).replace("\n", " ").strip()

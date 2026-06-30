@@ -14,7 +14,7 @@ services:
       - key: RETELL_WEBHOOK_URL
         sync: false
       - key: RETELL_MODEL
-        value: claude-3.5-haiku
+        value: claude-4.5-haiku
       - key: RETELL_VOICE_ID
         value: 11labs-Adrian
       - key: GHL_API_TOKEN
