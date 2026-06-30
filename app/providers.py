@@ -162,12 +162,15 @@ class GHLCalendar(CalendarProvider):
     def _find_contact_by_phone(self, phone: str) -> str | None:
         e164 = self._to_e164(phone or "")
         if not e164:
+            logger.warning("GHL contact search: could not normalize phone %r", phone)
             return None
-        r = self.client.get(
-            f"{self.BASE}/contacts/",
+        # POST /contacts/search is the current non-deprecated endpoint
+        r = self.client.post(
+            f"{self.BASE}/contacts/search",
             headers=self._headers(),
-            params={"locationId": self.location_id, "query": e164, "limit": 5},
+            json={"locationId": self.location_id, "query": e164, "pageLimit": 5},
         )
+        logger.info("GHL contact search %s → %s: %s", e164, r.status_code, r.text[:300])
         if r.status_code == 404:
             return None
         if r.status_code != 200:
@@ -176,60 +179,77 @@ class GHLCalendar(CalendarProvider):
             )
         d = r.json() or {}
         contacts = d.get("contacts") or []
-        return contacts[0].get("id") if contacts else None
+        contact_id = contacts[0].get("id") if contacts else None
+        logger.info("GHL contact search result: found=%s id=%s", bool(contact_id), contact_id)
+        return contact_id
 
     def _get_upcoming_appointment(self, contact_id: str) -> dict | None:
+        now = dt.datetime.now(dt.timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+        end_ms = int((now + dt.timedelta(days=90)).timestamp() * 1000)
         resp = self.client.get(
-            f"{self.BASE}/contacts/{contact_id}/appointments",
+            f"{self.BASE}/calendars/events",
             headers=self._headers(),
+            params={
+                "locationId": self.location_id,
+                "calendarId": self.calendar_id,
+                "startTime": now_ms,
+                "endTime": end_ms,
+            },
         )
+        logger.info("GHL calendar events → %s: %s", resp.status_code, resp.text[:400])
         if resp.status_code == 404:
             return None
         if resp.status_code != 200:
             raise RuntimeError(
-                f"GHL appointments lookup failed {resp.status_code}: {resp.text[:300]}"
+                f"GHL calendar events lookup failed {resp.status_code}: {resp.text[:300]}"
             )
         body = resp.json() or {}
-        appts = body if isinstance(body, list) else body.get("appointments") or []
-        now = dt.datetime.now(dt.timezone.utc)
-        upcoming = []
-        for a in appts:
-            raw = a.get("startTime") or a.get("start_time") or ""
-            try:
-                s = dt.datetime.fromisoformat(raw)
-                if s.tzinfo is None:
-                    s = s.replace(tzinfo=dt.timezone.utc)
-                if s > now:
-                    upcoming.append((s, a))
-            except ValueError:
-                pass
-        if not upcoming:
-            return None
-        upcoming.sort(key=lambda x: x[0])
-        return upcoming[0][1]
+        events = body.get("events") or []
+        logger.info("GHL calendar events: total=%d, searching for contactId=%s", len(events), contact_id)
+        cancelled_statuses = {"cancelled", "completed", "noshow", "invalid"}
+        for e in events:
+            if e.get("contactId") == contact_id:
+                status = e.get("appointmentStatus", "")
+                if status not in cancelled_statuses:
+                    logger.info("GHL found appointment id=%s status=%s startTime=%s",
+                                e.get("id"), status, e.get("startTime"))
+                    return e
+                logger.info("GHL appointment id=%s skipped (status=%s)", e.get("id"), status)
+        logger.info("GHL no upcoming appointment found for contact %s among %d events",
+                    contact_id, len(events))
+        return None
 
     def cancel(self, caller_phone: str) -> str | dict:
+        logger.info("GHL cancel: phone=%s", caller_phone)
         contact_id = self._find_contact_by_phone(caller_phone)
         if not contact_id:
+            logger.info("GHL cancel: no contact found → no_contact")
             return "no_contact"
         appt = self._get_upcoming_appointment(contact_id)
         if not appt:
+            logger.info("GHL cancel: no upcoming appt for contact %s → no_appointment", contact_id)
             return "no_appointment"
         appt_id = appt.get("id", "")
-        resp = self.client.delete(
+        resp = self.client.put(
             f"{self.BASE}/calendars/events/appointments/{appt_id}",
             headers=self._headers(),
+            json={"appointmentStatus": "cancelled"},
         )
+        logger.info("GHL cancel PUT %s → %s: %s", appt_id, resp.status_code, resp.text[:200])
         if resp.status_code not in (200, 201, 204):
             raise RuntimeError(f"GHL cancel failed {resp.status_code}: {resp.text}")
         return appt  # full dict so caller gets title + startTime in response
 
     def reschedule(self, caller_phone: str, new_slot: Slot) -> str:
+        logger.info("GHL reschedule: phone=%s", caller_phone)
         contact_id = self._find_contact_by_phone(caller_phone)
         if not contact_id:
+            logger.info("GHL reschedule: no contact found → no_contact")
             return "no_contact"
         appt = self._get_upcoming_appointment(contact_id)
         if not appt:
+            logger.info("GHL reschedule: no upcoming appt for contact %s → no_appointment", contact_id)
             return "no_appointment"
         appt_id = appt.get("id", "")
         contact_id = appt.get("contactId") or appt.get("contact_id") or ""

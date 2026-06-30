@@ -1,6 +1,6 @@
 """
 The only server you run (Stage 1) — Retell + GoHighLevel.
-Build: 2026-06-30-r1  (force redeploy — fix routing regression on Render free tier)
+Build: 2026-06-30-r4  (POST contacts/search, GET calendars/events, cancel via PUT)
 
   uvicorn app.server:app --port 4242   (run.sh does this for you)
 
@@ -38,7 +38,7 @@ SessionLocal = dbmod.make_session_factory(engine)
 dbmod.init_db(engine)
 
 app = FastAPI(title="Clinic Voice AI — Stage 1 (Retell + GHL)")
-logger.info("=== Clinic Voice AI starting — build 2026-06-30-r2 ===")
+logger.info("=== Clinic Voice AI starting — build 2026-06-30-r4 ===")
 
 
 def _make_calendar():
