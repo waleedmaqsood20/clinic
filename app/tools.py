@@ -174,7 +174,9 @@ class ToolExecutor:
         for a in appts:
             event_id = a.get("id", "")
             raw_title = a.get("title") or "appointment"
-            service = raw_title.split(" - ")[0].strip()
+            parts = raw_title.split(" - ", 1)
+            service = parts[0].strip()
+            booked_name = parts[1].strip() if len(parts) > 1 else ""
             raw = a.get("startTime") or ""
             try:
                 start_dt = dt.datetime.fromisoformat(raw)
@@ -184,7 +186,8 @@ class ToolExecutor:
                 date_str = "unknown date"
                 time_str = "unknown time"
             items.append({"event_id": event_id, "date": date_str,
-                          "time": time_str, "service": service})
+                          "time": time_str, "service": service,
+                          "booked_name": booked_name})
         return json.dumps({"appointments": items})
 
     def _cancel(self, event_id: str) -> str:
