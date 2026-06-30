@@ -38,6 +38,7 @@ SessionLocal = dbmod.make_session_factory(engine)
 dbmod.init_db(engine)
 
 app = FastAPI(title="Clinic Voice AI — Stage 1 (Retell + GHL)")
+logger.info("=== Clinic Voice AI starting — build 2026-06-30-r2 ===")
 
 
 def _make_calendar():
@@ -73,8 +74,12 @@ async def retell_function(request: Request):
     raw = await request.body()
     security.verify_retell_request(raw, request.headers.get("x-retell-signature"))
     body = json.loads(raw or b"{}")
+    fn_name = body.get("name", "?")
+    has_args = body.get("args") is not None
+    logger.info("[RETELL] fn=%s has_args=%s keys=%s", fn_name, has_args, list(body.keys()))
     result = handle_function_call(body, executor)
-    return JSONResponse(content=result)      # Retell hands this string to the agent
+    logger.info("[RETELL] fn=%s -> %s", fn_name, result[:80])
+    return JSONResponse(content={"result": result})
 
 
 @app.post("/retell/webhook")
