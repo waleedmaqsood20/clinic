@@ -159,19 +159,38 @@ class GHLCalendar(CalendarProvider):
         e164 = self._to_e164(phone or "")
         if not e164:
             return None
-        resp = self.client.get(
+
+        # First try duplicate-check endpoint
+        r1 = self.client.get(
             f"{self.BASE}/contacts/search/duplicate",
             headers=self._headers(),
             params={"locationId": self.location_id, "phone": e164},
         )
-        if resp.status_code == 404:
-            return None
-        if resp.status_code != 200:
+        if r1.status_code not in (200, 404):
             raise RuntimeError(
-                f"GHL contact search failed {resp.status_code}: {resp.text[:300]}"
+                f"GHL contact search failed {r1.status_code}: {r1.text[:300]}"
             )
-        d = resp.json() or {}
-        return (d.get("contact") or {}).get("id") or d.get("id")
+        if r1.status_code == 200:
+            d = r1.json() or {}
+            contact_id = (d.get("contact") or {}).get("id") or d.get("id")
+            if contact_id:
+                return contact_id
+
+        # Fallback: general contact search by phone string
+        r2 = self.client.get(
+            f"{self.BASE}/contacts/search",
+            headers=self._headers(),
+            params={"locationId": self.location_id, "query": e164, "pageSize": 5},
+        )
+        if r2.status_code == 404:
+            return None
+        if r2.status_code != 200:
+            raise RuntimeError(
+                f"GHL contacts/search failed {r2.status_code}: {r2.text[:300]}"
+            )
+        d2 = r2.json() or {}
+        contacts = d2.get("contacts") or []
+        return contacts[0].get("id") if contacts else None
 
     def _get_upcoming_appointment(self, contact_id: str) -> dict | None:
         resp = self.client.get(
