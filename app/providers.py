@@ -164,8 +164,12 @@ class GHLCalendar(CalendarProvider):
             headers=self._headers(),
             params={"locationId": self.location_id, "phone": e164},
         )
-        if resp.status_code != 200:
+        if resp.status_code == 404:
             return None
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"GHL contact search failed {resp.status_code}: {resp.text[:300]}"
+            )
         d = resp.json() or {}
         return (d.get("contact") or {}).get("id") or d.get("id")
 
@@ -174,8 +178,12 @@ class GHLCalendar(CalendarProvider):
             f"{self.BASE}/contacts/{contact_id}/appointments",
             headers=self._headers(),
         )
-        if resp.status_code != 200:
+        if resp.status_code == 404:
             return None
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"GHL appointments lookup failed {resp.status_code}: {resp.text[:300]}"
+            )
         body = resp.json() or {}
         appts = body if isinstance(body, list) else body.get("appointments") or []
         now = dt.datetime.now(dt.timezone.utc)
