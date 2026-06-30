@@ -250,6 +250,7 @@ class GHLCalendar(CalendarProvider):
         if not appt:
             return "no_appointment"
         appt_id = appt.get("id", "")
+        contact_id = appt.get("contactId") or appt.get("contact_id") or ""
         tz = ZoneInfo(self.timezone)
         if new_slot.iso_utc:
             start_dt = dt.datetime.fromisoformat(new_slot.iso_utc)
@@ -262,6 +263,7 @@ class GHLCalendar(CalendarProvider):
         body: dict = {
             "calendarId": self.calendar_id,
             "locationId": self.location_id,
+            "contactId": contact_id,
             "startTime": start_dt.isoformat(),
             "endTime": end_dt.isoformat(),
             "appointmentStatus": "confirmed",
