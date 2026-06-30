@@ -28,7 +28,8 @@ Last updated: 2026-06-30
 | FAQ lookup | ✅ Working | |
 | Check availability | ✅ Working | |
 | Book appointment | ✅ Working | GHL upsert + appointment create |
-| Cancel appointment | ✅ Code fixed | Needs live test with a FUTURE appointment |
+| Check upcoming appointments | ✅ Working | Returns event_id, date, time, service, booked_name |
+| Cancel appointment | ✅ Live tested | Confirmed working with real caller (Alex, Jul 2026) |
 | Reschedule appointment | ⚠️ Not tested | Code in place, never tested end-to-end |
 | SMS confirmation | ⏸ Paused | Client setting up Retell text integration |
 | Staff dashboard | ✅ Live | `/dashboard?token=<DASHBOARD_TOKEN>` |
@@ -61,21 +62,39 @@ The flat-format fallback (below this) also strips `"name"` and `"args"` from the
 
 ## GHL API quirks
 
-### Contact lookup: use `/contacts/search`, not `/contacts/search/duplicate`
+### Contact lookup: use `POST /contacts/search`
 
-`/contacts/search/duplicate` is a pre-creation duplicate check — unreliable for finding existing contacts.
+`/contacts/search/duplicate` is deprecated — unreliable for existing contact lookup.
+`GET /contacts/` (list endpoint) is also deprecated.
 
-Current `_find_contact_by_phone()` tries `duplicate` first, then falls back to:
+Current `_find_contact_by_phone()` uses:
 ```
-GET /contacts/search?locationId=...&query=<e164_phone>&pageSize=5
+POST /contacts/search   body: {"locationId": ..., "query": <e164>, "pageLimit": 5}
 ```
-The fallback is the reliable one.
+Returns `{"contacts": [...]}`. Take `contacts[0]["id"]`.
 
-### Appointment lookup
+### Appointment lookup: use `GET /calendars/events`, not `/contacts/{id}/appointments`
 
-`GET /contacts/{contactId}/appointments` returns `{ "appointments": [...] }` (or sometimes a bare list). We filter to `startTime > now` in UTC and pick the earliest.
+`GET /contacts/{contactId}/appointments` was returning empty even for known appointments — do not use.
 
-**Timezone caution:** `startTime` in GHL responses may or may not have a timezone offset. We always attach UTC if tzinfo is missing before comparing.
+Current `_fetch_calendar_events()` uses:
+```
+GET /calendars/events?locationId=...&calendarId=...&startTime=<now_ms>&endTime=<90d_ms>
+```
+Returns `{"events": [...]}`. Filter by `e["contactId"] == contact_id` and exclude statuses in `{cancelled, completed, noshow, invalid}`.
+
+### Cancel: use `PUT`, not `DELETE`
+
+`DELETE /calendars/events/appointments/{id}` does not work reliably. Use:
+```
+PUT /calendars/events/appointments/{id}   body: {"appointmentStatus": "cancelled"}
+```
+
+### Reschedule: `PUT` with new times + confirmed status
+```
+PUT /calendars/events/appointments/{id}
+body: {"calendarId": ..., "locationId": ..., "startTime": ..., "endTime": ..., "appointmentStatus": "confirmed"}
+```
 
 ### E.164 normalization
 
@@ -126,13 +145,15 @@ First request after sleep takes ~10–15 seconds. Retell may timeout on the firs
 | `d6c6f44` | GHL errors silently returned `None` (hid real API failures) | Raise `RuntimeError` on unexpected status codes from GHL |
 | `445080c` | `contacts/search/duplicate` didn't find existing contacts | Added fallback to `contacts/search` with phone as query |
 | `f3166e0` | **ALL tools routed to cancel** (most critical bug) | Fixed `_infer_function()` to use `body["name"]`/`body["args"]` directly instead of inferring from remaining keys |
+| `8910d3f` | Cancel returned "no appointment" despite appointment existing | Three stacked bugs: deprecated `/contacts/` → `POST /contacts/search`; deprecated `/contacts/{id}/appointments` → `GET /calendars/events`; `DELETE` → `PUT appointmentStatus=cancelled`. Also split cancel/reschedule into find-then-act (check_upcoming_appointments first) |
+| `66232b3` | Agent didn't know name appointment was booked under; lectured caller about cancel vs reschedule | Added `booked_name` to check_upcoming JSON; system prompt now reads name back and treats reschedule-after-cancel as new booking |
 
 ---
 
 ## Pending work
 
-- [ ] **Live cancel test** — book a future appointment, then call to cancel it and verify GHL deletes it
-- [ ] **Reschedule test** — book future appt, call to reschedule, verify GHL updates it
+- [x] **Live cancel test** — confirmed working with real caller (Jul 2026); GHL marks appointment as cancelled
+- [ ] **Reschedule test** — book future appt, call to reschedule, verify GHL updates it (never tested end-to-end)
 - [ ] **Render upgrade** — move to paid tier to eliminate cold-start sleep
 - [ ] **PostgreSQL** — switch from SQLite to managed Postgres for production
 - [ ] **Rotate API keys** — rotate GHL token + Retell key (security hygiene)
