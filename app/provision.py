@@ -27,14 +27,12 @@ MODEL = os.getenv("RETELL_MODEL", "claude-4.5-haiku")
 VOICE_ID = os.getenv("RETELL_VOICE_ID", "11labs-Adrian")
 CLINIC = knowledge.CLINIC_PROFILE
 
-_TODAY = datetime.date.today().strftime("%A, %B %d, %Y")
-
-SYSTEM = f"""You are the phone receptionist for {CLINIC['name']}, a dental and \
+_SYSTEM_TEMPLATE = """You are the phone receptionist for {clinic_name}, a dental and \
 aesthetic clinic in Indianapolis, Indiana (US Eastern Time). You're on a live \
 phone call, so keep replies short, warm and natural — one or two sentences, never \
 lists.
 
-Today's date is {_TODAY}. Always use this year when converting caller-mentioned \
+Today's date is {today}. Always use this year when converting caller-mentioned \
 dates to YYYY-MM-DD. Never book dates in the past.
 
 How to behave:
@@ -104,8 +102,12 @@ TOOLS = [
 
 
 def build_llm_payload() -> dict:
+    system = _SYSTEM_TEMPLATE.format(
+        clinic_name=CLINIC["name"],
+        today=datetime.date.today().strftime("%A, %B %d, %Y"),
+    )
     return {
-        "general_prompt": SYSTEM,
+        "general_prompt": system,
         "general_tools": TOOLS,
         "model": MODEL,
         "model_temperature": 0.3,

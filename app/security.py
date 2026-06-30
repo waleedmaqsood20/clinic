@@ -11,17 +11,25 @@ import os
 
 from fastapi import HTTPException
 
+_retell_client = None
+
+
+def _get_client():
+    global _retell_client
+    if _retell_client is None:
+        try:
+            from retell import Retell
+        except ImportError as e:                  # pragma: no cover
+            raise HTTPException(status_code=500,
+                                detail="retell-sdk not installed") from e
+        _retell_client = Retell(api_key=os.environ["RETELL_API_KEY"])
+    return _retell_client
+
 
 def verify_retell_request(raw_body: bytes, signature: str | None) -> None:
     api_key = os.getenv("RETELL_API_KEY")
     if not api_key:
         return  # dev mode: no key configured
-    try:
-        from retell import Retell
-    except ImportError as e:                      # pragma: no cover
-        raise HTTPException(status_code=500,
-                            detail="retell-sdk not installed") from e
-    ok = Retell(api_key=api_key).verify(
-        raw_body.decode("utf-8"), api_key, signature or "")
+    ok = _get_client().verify(raw_body.decode("utf-8"), api_key, signature or "")
     if not ok:
         raise HTTPException(status_code=401, detail="invalid webhook signature")

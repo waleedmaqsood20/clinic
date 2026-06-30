@@ -5,6 +5,7 @@ Phone numbers are masked to the last 4 digits. Summaries are decrypted for
 authenticated viewers. Set DASHBOARD_TOKEN in .env before using.
 """
 from __future__ import annotations
+import hmac
 import os
 
 from fastapi import APIRouter, HTTPException, Request
@@ -18,8 +19,8 @@ def _auth(request: Request) -> None:
     if not token:
         raise HTTPException(503, "Dashboard not configured — set DASHBOARD_TOKEN")
     sent = (request.headers.get("x-dashboard-token")
-            or request.query_params.get("token"))
-    if sent != token:
+            or request.query_params.get("token") or "")
+    if not hmac.compare_digest(sent, token):
         raise HTTPException(401, "unauthorized")
 
 
@@ -81,6 +82,9 @@ def make_dashboard_router(session_factory) -> APIRouter:
 <h1>Recent Calls</h1>
 <div id="data">Loading…</div>
 <script>
+function esc(s) {{
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}}
 fetch('/api/calls?token={token}')
   .then(r => r.json())
   .then(rows => {{
@@ -92,12 +96,12 @@ fetch('/api/calls?token={token}')
           + '<th>Duration (s)</th><th>Booked</th><th>Summary</th></tr>';
     rows.forEach(r => {{
       t += `<tr>
-        <td>${{r.call_id || ''}}</td>
-        <td>${{r.phone || ''}}</td>
-        <td>${{r.outcome || ''}}</td>
-        <td>${{r.duration_seconds ?? ''}}</td>
+        <td>${{esc(r.call_id)}}</td>
+        <td>${{esc(r.phone)}}</td>
+        <td>${{esc(r.outcome)}}</td>
+        <td>${{esc(r.duration_seconds)}}</td>
         <td>${{r.booked ? 'Yes' : 'No'}}</td>
-        <td>${{r.summary || ''}}</td>
+        <td>${{esc(r.summary)}}</td>
       </tr>`;
     }});
     t += '</table>';
