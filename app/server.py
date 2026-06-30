@@ -1,5 +1,6 @@
 """
 The only server you run (Stage 1) — Retell + GoHighLevel.
+Build: 2026-06-30-r1  (force redeploy — fix routing regression on Render free tier)
 
   uvicorn app.server:app --port 4242   (run.sh does this for you)
 
