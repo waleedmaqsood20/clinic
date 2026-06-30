@@ -27,6 +27,12 @@ def _key() -> bytes:
             stacklevel=3,
         )
         return _DEV_KEY
+    # Accept both hex (64-char = 32 bytes) and base64-encoded keys
+    if len(raw) == 64:
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            pass
     return base64.b64decode(raw)
 
 
