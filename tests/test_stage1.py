@@ -50,15 +50,27 @@ class FakeGHL:
     def __init__(self): self.calls = []
     def get(self, url, headers=None, params=None):
         self.calls.append(("GET", url, headers, params))
+        if "calendars/events" in url and "free-slots" not in url:
+            return FakeResp(200, {"events": [
+                {"id": "evt_789", "contactId": "contact_123",
+                 "appointmentStatus": "confirmed",
+                 "startTime": "2026-07-06T09:00:00-04:00",
+                 "title": "cleaning - Test User"}
+            ]})
         return FakeResp(200, {"2026-06-16": {"slots":
             ["2026-06-16T10:00:00-04:00", "2026-06-16T10:30:00-04:00"]}, "traceId": "x"})
     def post(self, url, headers=None, json=None):
         self.calls.append(("POST", url, headers, json))
         if url.endswith("/contacts/upsert"):
             return FakeResp(200, {"contact": {"id": "contact_123"}})
+        if url.endswith("/contacts/search"):
+            return FakeResp(200, {"contacts": [{"id": "contact_123"}]})
         if url.endswith("/calendars/events/appointments"):
             return FakeResp(201, {"id": "appt_456"})
         return FakeResp(404, {}, "nope")
+    def put(self, url, headers=None, json=None):
+        self.calls.append(("PUT", url, headers, json))
+        return FakeResp(200, {"id": url.rstrip("/").split("/")[-1]})
 
 
 def main():
@@ -72,14 +84,15 @@ def main():
     # 2) FAQ via the Retell function endpoint
     r = client.post("/retell/function", json=fn("lookup_faq", {"query": "opening hours"}))
     check("Function endpoint returns 200", r.status_code == 200)
-    check("FAQ result is a JSON string with hours",
-          isinstance(r.json(), str) and "open" in r.json().lower())
+    result_text = r.json().get("result", "") if isinstance(r.json(), dict) else r.json()
+    check("FAQ result is a string with hours", "open" in result_text.lower())
 
     # 3) Booking persists (encrypted) + audit
     r = client.post("/retell/function", json=fn("book_appointment",
         {"day": "2026-06-16", "time": "10am", "name": "Sarah Jones",
          "service": "cleaning", "reason": "tooth pain"}))
-    check("Booking result confirms", "Booked" in r.json())
+    result_text = r.json().get("result", "") if isinstance(r.json(), dict) else r.json()
+    check("Booking result confirms", "Booked" in result_text)
     with SessionLocal() as s:
         from app.models import Appointment, AuditLog
         appt = s.query(Appointment).filter_by(call_id=CALL_ID).one_or_none()
@@ -149,6 +162,35 @@ def main():
           posts[1][3]["contactId"] == "contact_123" and
           posts[1][3]["calendarId"] == "cal" and
           posts[1][3]["startTime"] == "2026-06-16T10:00:00-04:00")
+
+    # 7) GHL check_upcoming_appointments — phone lookup then calendar events
+    ghl2 = GHLCalendar(token="tok", location_id="loc", calendar_id="cal",
+                       timezone="America/Indiana/Indianapolis", client=FakeGHL())
+    upcoming = ghl2.get_upcoming_appointments(PHONE)
+    check("GHL get_upcoming_appointments returns list", isinstance(upcoming, list))
+    check("GHL get_upcoming_appointments uses POST /contacts/search",
+          any(c[0] == "POST" and "contacts/search" in c[1] for c in ghl2.client.calls))
+    check("GHL get_upcoming_appointments uses GET /calendars/events",
+          any(c[0] == "GET" and "calendars/events" in c[1] for c in ghl2.client.calls))
+
+    # 8) GHL cancel by event_id
+    ghl3 = GHLCalendar(token="tok", location_id="loc", calendar_id="cal",
+                       timezone="America/Indiana/Indianapolis", client=FakeGHL())
+    result = ghl3.cancel("evt_789")
+    check("GHL cancel returns 'cancelled'", result == "cancelled")
+    check("GHL cancel uses PUT with appointmentStatus",
+          any(c[0] == "PUT" and c[3].get("appointmentStatus") == "cancelled"
+              for c in ghl3.client.calls))
+
+    # 9) GHL reschedule by event_id
+    ghl4 = GHLCalendar(token="tok", location_id="loc", calendar_id="cal",
+                       timezone="America/Indiana/Indianapolis", client=FakeGHL())
+    new_slot = slots[1]  # 10:30am slot from earlier
+    result = ghl4.reschedule("evt_789", new_slot)
+    check("GHL reschedule returns event_id", result == "evt_789")
+    check("GHL reschedule uses PUT with confirmed status",
+          any(c[0] == "PUT" and c[3].get("appointmentStatus") == "confirmed"
+              for c in ghl4.client.calls))
 
     print("-" * 60)
     print("RESULT:", "ALL CHECKS PASSED ✅" if ok else "SOMETHING FAILED ❌")

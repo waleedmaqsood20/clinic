@@ -41,11 +41,16 @@ lookup_faq and answer from what it gives you. Never make these up.
 - When the caller wants to book, get their full name and reason for visit, use \
 check_availability for the right day, offer the times returned, then use \
 book_appointment (day as YYYY-MM-DD, plus time, name, service, reason) and confirm.
-- When the caller wants to cancel, confirm their name and use cancel_appointment. \
-The system looks them up by the number they are calling from.
-- When the caller wants to reschedule, confirm their name and preferred new day and \
-time, check availability first, then use reschedule_appointment with new_day \
-(YYYY-MM-DD), new_time, and name. The system moves their existing booking.
+- When the caller wants to cancel, reschedule, or asks what appointments they have, \
+ALWAYS call check_upcoming_appointments first — never call cancel_appointment or \
+reschedule_appointment directly. If it returns one appointment, read it back clearly \
+(date, time, service) and get explicit confirmation before acting. If it returns more \
+than one, list all of them and ask which one. If it returns none, apologize and offer \
+a callback — do not retry repeatedly. Never claim to have cancelled or rescheduled \
+something unless the tool result explicitly confirms success.
+- For reschedule: after check_upcoming_appointments, use check_availability for the \
+new day, offer times, then call reschedule_appointment with the event_id from the \
+check result and the new_day (YYYY-MM-DD) and new_time the caller chose.
 - You are NOT a clinician. Do not give medical or dental advice — for clinical \
 questions, offer to have a dentist or team member follow up.
 - This call may be recorded to support the caller's care; if they ask, confirm that. \
@@ -87,19 +92,27 @@ TOOLS = [
            "reason": {"type": "string", "description": "reason for visit"},
            "phone": {"type": "string", "description": "caller's phone number if they provided one"}},
           ["day", "time", "name", "service"]),
+    _tool("check_upcoming_appointments",
+          "Look up all upcoming appointments for the caller. ALWAYS call this first before "
+          "cancelling or rescheduling. Returns a list with event_id, date, time, service.",
+          {},
+          []),
     _tool("cancel_appointment",
-          "Cancel the caller's next upcoming appointment. The system finds it by phone number.",
-          {"name": {"type": "string", "description": "Patient's full name to confirm identity"},
-           "phone": {"type": "string", "description": "Caller's phone number — ask for it if not automatically captured"}},
-          ["name"]),
+          "Cancel a specific appointment. Requires event_id from check_upcoming_appointments. "
+          "Never call this without first calling check_upcoming_appointments.",
+          {"event_id": {"type": "string",
+                        "description": "The event_id returned by check_upcoming_appointments"}},
+          ["event_id"]),
     _tool("reschedule_appointment",
-          "Move the caller's existing appointment to a new date and time.",
-          {"name": {"type": "string"},
+          "Move a specific appointment to a new date and time. Requires event_id from "
+          "check_upcoming_appointments. Never call this without first calling "
+          "check_upcoming_appointments.",
+          {"event_id": {"type": "string",
+                        "description": "The event_id returned by check_upcoming_appointments"},
            "new_day": {"type": "string", "description": "New date as YYYY-MM-DD"},
            "new_time": {"type": "string", "description": "New time e.g. '10am' or '14:30'"},
-           "service": {"type": "string", "description": "service type if known"},
-           "phone": {"type": "string", "description": "Caller's phone number — ask for it if not automatically captured"}},
-          ["name", "new_day", "new_time"]),
+           "service": {"type": "string", "description": "Service type if known"}},
+          ["event_id", "new_day", "new_time"]),
 ]
 
 

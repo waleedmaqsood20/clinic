@@ -86,6 +86,35 @@ def main() -> int:
     result = ex.execute("nonexistent_tool", {}, "+10000000000")
     check("Executor: unknown tool name returns message", "Unknown" in result)
 
+    # 8) check_upcoming_appointments — InMemoryCalendar has no bookings by phone
+    result = ex.execute("check_upcoming_appointments", {}, "+13175550099")
+    import json as _json
+    parsed = _json.loads(result)
+    check("Executor: check_upcoming returns JSON with appointments key",
+          "appointments" in parsed)
+    check("Executor: check_upcoming returns empty list for InMemory",
+          parsed["appointments"] == [])
+
+    # 9) cancel_appointment — requires event_id; missing id returns error string
+    result = ex.execute("cancel_appointment", {}, "+13175550099")
+    check("Executor: cancel without event_id returns error", "need" in result.lower())
+
+    # 10) cancel_appointment — InMemoryCalendar stub accepts any event_id
+    result = ex.execute("cancel_appointment", {"event_id": "INMEM1001"}, "+13175550099")
+    check("Executor: cancel with event_id confirms cancellation",
+          "cancelled" in result.lower())
+
+    # 11) reschedule_appointment — requires event_id; missing id returns error string
+    result = ex.execute("reschedule_appointment",
+                        {"new_day": "2026-06-17", "new_time": "10am"}, "+13175550099")
+    check("Executor: reschedule without event_id returns error", "need" in result.lower())
+
+    # 12) reschedule_appointment — InMemoryCalendar stub accepts any event_id
+    result = ex.execute("reschedule_appointment",
+                        {"event_id": "INMEM1001", "new_day": "2026-06-17", "new_time": "10am"},
+                        "+13175550099")
+    check("Executor: reschedule with event_id confirms move", "moved" in result.lower())
+
     print("-" * 60)
     print("RESULT:", "ALL CHECKS PASSED ✅" if ok else "SOMETHING FAILED ❌")
     return 0 if ok else 1
