@@ -106,11 +106,13 @@ class ToolExecutor:
                               args.get("service", "exam"),
                               args.get("reason", ""), phone, call_id)
         if name == "cancel_appointment":
-            return self._cancel(args.get("name", "the caller"), caller_phone)
+            phone = args.get("phone") or caller_phone
+            return self._cancel(args.get("name", "the caller"), phone)
         if name == "reschedule_appointment":
+            phone = args.get("phone") or caller_phone
             return self._reschedule(args.get("name", "the caller"),
                                     args.get("new_day", ""), args.get("new_time", ""),
-                                    args.get("service", ""), caller_phone)
+                                    args.get("service", ""), phone)
         return f"Unknown tool {name}."
 
     def _faq(self, query: str) -> str:
