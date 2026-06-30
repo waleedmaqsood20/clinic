@@ -11,6 +11,7 @@ phone (from caller ID), and reason for visit, and persist bookings + an audit
 record. There is no patient lookup yet (that's Stage 2).
 """
 from __future__ import annotations
+import json
 import logging
 import re
 import datetime as dt
@@ -105,14 +106,14 @@ class ToolExecutor:
                               args.get("name", "the caller"),
                               args.get("service", "exam"),
                               args.get("reason", ""), phone, call_id)
+        if name == "check_upcoming_appointments":
+            return self._check_upcoming(caller_phone)
         if name == "cancel_appointment":
-            phone = args.get("phone") or caller_phone
-            return self._cancel(args.get("name", "the caller"), phone)
+            return self._cancel(args.get("event_id", ""))
         if name == "reschedule_appointment":
-            phone = args.get("phone") or caller_phone
-            return self._reschedule(args.get("name", "the caller"),
+            return self._reschedule(args.get("event_id", ""),
                                     args.get("new_day", ""), args.get("new_time", ""),
-                                    args.get("service", ""), phone)
+                                    args.get("service", ""))
         return f"Unknown tool {name}."
 
     def _faq(self, query: str) -> str:
@@ -165,39 +166,47 @@ class ToolExecutor:
             note = ""
         return f"Booked {service} for {name} on {when}. Confirmation {conf}. {note}".strip()
 
-    def _cancel(self, name: str, caller_phone: str) -> str:
-        result = self.calendar.cancel(caller_phone)
-        if result == "no_contact":
-            return ("I couldn't find a record for this number. "
-                    "Could you confirm the phone number you booked with?")
-        if result == "no_appointment":
-            return (f"I don't see any upcoming appointments for {name}. "
-                    "Is it possible it was booked under a different number?")
-        title = (result.get("title") or "appointment").split(" - ")[0].strip()
-        raw = result.get("startTime") or result.get("start_time") or ""
-        try:
-            start_dt = dt.datetime.fromisoformat(raw)
-            when = f"{_fmt_day(start_dt.date())} at {_fmt_time(start_dt)}"
-        except (ValueError, TypeError):
-            when = "the scheduled time"
-        return (f"Done, {name} — your {title} on {when} has been cancelled. "
-                "We hope to see you again soon.")
+    def _check_upcoming(self, caller_phone: str) -> str:
+        appts = self.calendar.get_upcoming_appointments(caller_phone)
+        if not appts:
+            return json.dumps({"appointments": []})
+        items = []
+        for a in appts:
+            event_id = a.get("id", "")
+            raw_title = a.get("title") or "appointment"
+            service = raw_title.split(" - ")[0].strip()
+            raw = a.get("startTime") or ""
+            try:
+                start_dt = dt.datetime.fromisoformat(raw)
+                date_str = _fmt_day(start_dt.date())
+                time_str = _fmt_time(start_dt)
+            except (ValueError, TypeError):
+                date_str = "unknown date"
+                time_str = "unknown time"
+            items.append({"event_id": event_id, "date": date_str,
+                          "time": time_str, "service": service})
+        return json.dumps({"appointments": items})
 
-    def _reschedule(self, name: str, day_str: str, time_str: str,
-                    service: str, caller_phone: str) -> str:
+    def _cancel(self, event_id: str) -> str:
+        if not event_id:
+            return ("I need the appointment ID to cancel. "
+                    "Please call check_upcoming_appointments first to get it.")
+        self.calendar.cancel(event_id)
+        return "Done — that appointment has been cancelled. We hope to see you again soon."
+
+    def _reschedule(self, event_id: str, day_str: str, time_str: str,
+                    service: str) -> str:
+        if not event_id:
+            return ("I need the appointment ID to reschedule. "
+                    "Please call check_upcoming_appointments first to get it.")
         day = _parse_day(day_str)
         slots = self.calendar.availability(day, service or "exam")
         slot = _match_time(slots, time_str)
         if not slot:
             return "That time isn't available — offer the caller another slot."
-        result = self.calendar.reschedule(caller_phone, slot)
-        if result == "no_contact":
-            return "I couldn't find a patient record for this number."
-        if result == "no_appointment":
-            return (f"I don't see any upcoming appointments for {name}. "
-                    "Is it possible it was booked under a different number?")
+        self.calendar.reschedule(event_id, slot)
         when = f"{_fmt_day(slot.start)} at {_fmt_time(slot.start)}"
-        return f"Done, {name} — your appointment has been moved to {when}."
+        return f"Done — your appointment has been moved to {when}."
 
 
 # ---------- the function Retell talks to ----------
