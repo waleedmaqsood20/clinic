@@ -128,7 +128,7 @@ class ToolExecutor:
         slots = self.calendar.availability(day, service)
         if not slots:
             return f"No availability on {_fmt_day(day)}. Offer another day."
-        times = ", ".join(_fmt_time(s.start) for s in slots[:6])
+        times = ", ".join(_fmt_time(s.start) for s in slots)
         return f"Available on {_fmt_day(day)}: {times}."
 
     def _book(self, day_str: str, time_str: str, name: str, service: str,
