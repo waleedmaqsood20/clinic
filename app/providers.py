@@ -35,6 +35,10 @@ class CalendarProvider:
         """Return list of upcoming appointment dicts (id, startTime, title, appointmentStatus)."""
         return []
 
+    def get_week_availability(self, service: str = "") -> dict:
+        """Return {YYYY-MM-DD: [Slot, ...]} for the next 7 days."""
+        return {}
+
     def cancel(self, event_id: str) -> str:
         """Cancel appointment by event_id. Returns 'cancelled' or raises RuntimeError."""
         return "no_appointment"
@@ -71,6 +75,16 @@ class InMemoryCalendar(CalendarProvider):
 
     def get_upcoming_appointments(self, caller_phone: str) -> list[dict]:
         return []
+
+    def get_week_availability(self, service: str = "") -> dict:
+        result = {}
+        today = dt.date.today()
+        for i in range(7):
+            day = today + dt.timedelta(days=i)
+            slots = self.availability(day, service)
+            if slots:
+                result[day.isoformat()] = slots
+        return result
 
     def cancel(self, event_id: str) -> str:
         return "cancelled"
@@ -222,6 +236,34 @@ class GHLCalendar(CalendarProvider):
         events = body.get("events") or []
         logger.info("GHL calendar events total=%d", len(events))
         return events
+
+    def get_week_availability(self, service: str = "") -> dict:
+        """Fetch open slots for the next 7 days in a single GHL free-slots call."""
+        tz = ZoneInfo(self.timezone)
+        today = dt.date.today()
+        start_ms = int(dt.datetime.combine(today, dt.time(0, 0), tz).timestamp() * 1000)
+        end_ms = int(dt.datetime.combine(
+            today + dt.timedelta(days=7), dt.time(23, 59), tz).timestamp() * 1000)
+        resp = self.client.get(
+            f"{self.BASE}/calendars/{self.calendar_id}/free-slots",
+            headers=self._headers(),
+            params={"startDate": start_ms, "endDate": end_ms, "timezone": self.timezone},
+        )
+        if resp.status_code != 200:
+            logger.error("GHL week slots failed %s: %s", resp.status_code, resp.text[:200])
+            return {}
+        data = resp.json() or {}
+        result = {}
+        for key, value in data.items():
+            if not (len(key) == 10 and key[4] == "-"):
+                continue
+            slots = []
+            for iso in (value.get("slots", []) if isinstance(value, dict) else []):
+                start_dt = dt.datetime.fromisoformat(iso)
+                slots.append(Slot(start=start_dt, duration_min=self.slot_minutes, iso_utc=iso))
+            if slots:
+                result[key] = sorted(slots, key=lambda s: s.start)
+        return result
 
     def get_upcoming_appointments(self, caller_phone: str) -> list[dict]:
         """Return all upcoming appointments for this phone number as raw GHL event dicts."""

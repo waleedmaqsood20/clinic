@@ -108,6 +108,16 @@ stop immediately and let them take over. Don't finish your sentence in that case
 
 ---
 
+## First Action on Every Call
+
+On the very first user turn — no matter what they say — call get_week_availability \
+before responding. This gives you a complete picture of what's open this week so you \
+can answer "do you have anything Thursday?" without a second tool call and suggest \
+specific days if the caller is flexible. After the week is loaded, only call \
+check_availability again if you need to confirm a specific slot right before booking.
+
+---
+
 ## Call Flows
 
 ### When caller wants to book
@@ -237,6 +247,12 @@ TOOLS = [
            "reason": {"type": "string", "description": "reason for visit"},
            "phone": {"type": "string", "description": "caller's phone number if they provided one"}},
           ["day", "time", "name", "service"]),
+    _tool("get_week_availability",
+          "Get open appointment slots for the next 7 days in a single call. "
+          "Call this on the very first user turn of every call, before responding.",
+          {"service": {"type": "string",
+                       "description": "Service type if already known — omit if not yet"}},
+          []),
     _tool("check_upcoming_appointments",
           "Look up all upcoming appointments for the caller. ALWAYS call this first before "
           "cancelling or rescheduling. Returns a list with event_id, date, time, service.",

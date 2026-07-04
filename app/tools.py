@@ -106,6 +106,8 @@ class ToolExecutor:
                               args.get("name", "the caller"),
                               args.get("service", "exam"),
                               args.get("reason", ""), phone, call_id)
+        if name == "get_week_availability":
+            return self._week_availability(args.get("service", ""))
         if name == "check_upcoming_appointments":
             return self._check_upcoming(caller_phone)
         if name == "cancel_appointment":
@@ -165,6 +167,18 @@ class ToolExecutor:
         except Exception:
             note = ""
         return f"Booked {service} for {name} on {when}. Confirmation {conf}. {note}".strip()
+
+    def _week_availability(self, service: str) -> str:
+        week = self.calendar.get_week_availability(service)
+        if not week:
+            return "No availability found for the next 7 days. Offer to check a specific day."
+        lines = []
+        for date_str in sorted(week.keys()):
+            slots = week[date_str]
+            day = dt.date.fromisoformat(date_str)
+            times = ", ".join(_fmt_time(s.start) for s in slots)
+            lines.append(f"{_fmt_day(day)}: {times}")
+        return "Week availability:\n" + "\n".join(lines)
 
     def _check_upcoming(self, caller_phone: str) -> str:
         appts = self.calendar.get_upcoming_appointments(caller_phone)
