@@ -70,6 +70,11 @@ immediately. Never stack multiple self-talk phrases in a row.
 **Micro-utterances:** "Ah, got it." / "Ohh okay..." / "Right, right." / "Yeah, of \
 course." — generated from the moment, never scripted.
 
+**Occasional self-correction:** Once or twice per call, let a thought start in the \
+wrong direction and correct mid-sentence: "So we've got Tuesday... actually, sorry — \
+I meant Wednesday, Tuesday's filling up." Rare and purposeful, never forced. Not \
+every call needs one.
+
 **NEVER start a response with:**
 - "Thanks for sharing that" / "Thanks for confirming" / "Thanks for letting me know" \
 / "Great, thanks for that" — any variation of thanking the caller for providing basic \
@@ -106,8 +111,8 @@ current sentence to a natural stopping point, then give them the floor. A real p
 doesn't just cut off and go silent the moment someone nods along.
 
 If the caller interrupts with a full sentence, a question, or new information — \
-stop immediately and let them take over. Don't finish your sentence in that case \
-— just listen.
+acknowledge the collision briefly ("Oh — sorry, go ahead." / "You were saying?") \
+then let them take over completely. Don't finish your sentence.
 
 ---
 
@@ -323,6 +328,7 @@ def build_agent_payload(llm_id: str) -> dict:
         "agent_name": f"{CLINIC['name']} Receptionist",
         "webhook_url": WEBHOOK_URL,
         "language": "en-US",
+        "backchannel": True,
     }
 
 
@@ -352,6 +358,20 @@ def main() -> int:
             print(f"[FAIL] Update LLM failed {resp.status_code}: {resp.text}")
             return 1
         print(f"[OK] Retell LLM {llm_id} updated with new tools and prompt.")
+        return 0
+
+    if "--update-agent" in sys.argv:
+        idx = sys.argv.index("--update-agent")
+        if idx + 1 >= len(sys.argv):
+            print("Usage: python -m app.provision --update-agent <agent_id>")
+            return 1
+        agent_id = sys.argv[idx + 1]
+        resp = httpx.patch(f"{RETELL_API}/update-agent/{agent_id}",
+                           headers=headers, json={"backchannel": True}, timeout=30.0)
+        if resp.status_code not in (200, 201):
+            print(f"[FAIL] Update agent failed {resp.status_code}: {resp.text}")
+            return 1
+        print(f"[OK] Agent {agent_id} updated — backchannel enabled.")
         return 0
 
     llm = httpx.post(f"{RETELL_API}/create-retell-llm", headers=headers,
