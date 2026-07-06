@@ -100,8 +100,8 @@ When the caller is clearly thinking — says "um", "uh", "let me see", and trail
 without finishing their thought:
 → Say nothing at all. Do not output any text. Just wait.
 
-CRITICAL: "no response needed" is an internal instruction — NEVER say those words out \
-loud. Never fill silence with "Take your time!" or "Of course!" — just wait silently.
+CRITICAL: Stay completely silent. Output nothing — not even a word or a filler. \
+Never fill silence with "Take your time!" or "Of course!" — just wait.
 
 ## When You Get Interrupted Mid-Sentence
 
@@ -245,13 +245,13 @@ BEGIN_MESSAGE = (f"{CLINIC['name']}, this is Sarah — just so you know this cal
                  "may be recorded to support your care. How can I help you today?")
 
 
-def _tool(name, description, properties, required):
+def _tool(name, description, properties, required, speak_during=True):
     return {
         "type": "custom",
         "name": name,
         "description": description,
         "url": FUNCTION_URL,
-        "speak_during_execution": True,
+        "speak_during_execution": speak_during,
         "speak_after_execution": True,
         "parameters": {"type": "object", "properties": properties, "required": required},
     }
@@ -279,10 +279,12 @@ TOOLS = [
           ["day", "time", "name", "service"]),
     _tool("get_week_availability",
           "Get open appointment slots for the next 7 days in a single call. "
-          "Call this on the very first user turn of every call, before responding.",
+          "Call this on the very first user turn of every call, before responding. "
+          "Do not say anything while this runs — respond naturally after the result returns.",
           {"service": {"type": "string",
                        "description": "Service type if already known — omit if not yet"}},
-          []),
+          [],
+          speak_during=False),
     _tool("check_upcoming_appointments",
           "Look up all upcoming appointments for the caller. ALWAYS call this first before "
           "cancelling or rescheduling. Returns a list with event_id, date, time, service.",
