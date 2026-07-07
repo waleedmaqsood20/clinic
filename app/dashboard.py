@@ -11,7 +11,7 @@ import os
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import crypto, repository
+from . import crypto, repository, call_tracking
 
 
 def _auth(request: Request) -> None:
@@ -36,6 +36,17 @@ def _mask_phone(enc: bytes | None) -> str:
 
 def make_dashboard_router(session_factory) -> APIRouter:
     router = APIRouter()
+
+    @router.post("/api/sync-retell")
+    async def api_sync_retell(request: Request):
+        _auth(request)
+        api_key = os.getenv("RETELL_API_KEY")
+        if not api_key:
+            raise HTTPException(503, "RETELL_API_KEY not set")
+        import asyncio
+        result = await asyncio.to_thread(
+            call_tracking.sync_from_retell_api, session_factory, api_key)
+        return JSONResponse(content=result)
 
     @router.get("/api/kpis")
     async def api_kpis(request: Request):
@@ -101,6 +112,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .refresh{margin-left:auto;background:#007aff;color:#fff;border:none;
              border-radius:8px;padding:.45rem .9rem;font-size:.8rem;cursor:pointer}
     .refresh:hover{background:#0066d6}
+    .sync-btn{background:#f0f0f0;color:#3a3a3c;border:none;border-radius:8px;
+              padding:.45rem .9rem;font-size:.8rem;cursor:pointer;margin-left:.5rem}
+    .sync-btn:hover{background:#e0e0e0}
+    .sync-btn:disabled{opacity:.5;cursor:not-allowed}
     .wrap{max-width:1200px;margin:0 auto;padding:1.5rem 2rem}
     .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
               gap:.875rem;margin-bottom:1.25rem}
@@ -154,6 +169,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="sub">Voice AI — Call Dashboard</div>
   </div>
   <button class="refresh" onclick="load()">Refresh</button>
+  <button class="sync-btn" id="sync-btn" onclick="syncRetell()">Sync History</button>
 </header>
 
 <div class="wrap">
@@ -222,6 +238,20 @@ async function load(){
     t+='</tbody></table>';
     document.getElementById('calls').innerHTML=t;
   }catch(e){document.getElementById('calls').innerHTML='<div class="empty">Failed to load.</div>'}
+}
+
+async function syncRetell(){
+  const btn=document.getElementById('sync-btn');
+  btn.disabled=true;btn.textContent='Syncing…';
+  try{
+    const d=await fetch(`/api/sync-retell?token=${TOKEN}`,{method:'POST'}).then(r=>r.json());
+    btn.textContent=`Done — ${d.synced} synced`;
+    setTimeout(()=>{btn.textContent='Sync History';btn.disabled=false},4000);
+    load();
+  }catch(e){
+    btn.textContent='Failed';
+    setTimeout(()=>{btn.textContent='Sync History';btn.disabled=false},3000);
+  }
 }
 
 load();

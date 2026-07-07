@@ -34,6 +34,61 @@ def persist_from_retell(session_factory, call: dict, analyzed: bool) -> None:
         logger.exception("[RETELL] persist_from_retell failed for call %s", call.get("call_id"))
 
 
+def _normalize_ms(v) -> int | None:
+    """Retell mixes epoch units across endpoints — normalise to milliseconds."""
+    if v is None:
+        return None
+    n = int(v)
+    abs_n = abs(n)
+    if abs_n >= 10 ** 14:
+        return n // 1000   # microseconds → ms
+    if abs_n >= 10 ** 11:
+        return n           # already ms
+    return n * 1000        # seconds → ms
+
+
+def sync_from_retell_api(session_factory, retell_api_key: str) -> dict:
+    """Pull all calls from Retell /v2/list-calls and upsert into Postgres."""
+    import httpx
+    client = httpx.Client(timeout=30.0)
+    headers = {"Authorization": f"Bearer {retell_api_key}",
+               "Content-Type": "application/json"}
+    synced = skipped = 0
+    pagination_key = None
+
+    while True:
+        body: dict = {"limit": 100}
+        if pagination_key:
+            body["pagination_key"] = pagination_key
+        r = client.post("https://api.retellai.com/v2/list-calls",
+                        headers=headers, json=body)
+        if r.status_code != 200:
+            logger.error("Retell list-calls failed %s: %s", r.status_code, r.text[:200])
+            break
+        calls = r.json()
+        if not calls:
+            break
+        new_count = 0
+        for call in calls:
+            try:
+                # normalise timestamps before passing to _do_persist
+                for ts_field in ("start_timestamp", "end_timestamp"):
+                    if call.get(ts_field) is not None:
+                        call[ts_field] = _normalize_ms(call[ts_field])
+                _do_persist(session_factory, call, analyzed=True)
+                new_count += 1
+                synced += 1
+            except Exception:
+                logger.exception("sync: failed to persist call %s", call.get("call_id"))
+                skipped += 1
+        if not new_count:
+            break
+        pagination_key = calls[-1]["call_id"]
+
+    client.close()
+    return {"synced": synced, "skipped": skipped}
+
+
 def _do_persist(session_factory, call: dict, analyzed: bool) -> None:
     call_id = call.get("call_id")
     number = call.get("from_number") or ""
