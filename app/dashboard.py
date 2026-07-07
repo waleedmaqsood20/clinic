@@ -224,15 +224,17 @@ async function load(){
   try{
     const rows=await fetch(`/api/calls?token=${TOKEN}`).then(r=>r.json());
     if(!rows.length){document.getElementById('calls').innerHTML='<div class="empty">No calls recorded yet.</div>';return}
-    let t=`<table><thead><tr><th>Time</th><th>Phone</th><th>Duration</th><th>Outcome</th><th>Summary</th></tr></thead><tbody>`;
+    let t=`<table><thead><tr><th>Time</th><th>Phone</th><th>Duration</th><th>Outcome</th><th>Summary</th><th>Recording</th></tr></thead><tbody>`;
     rows.forEach((r,i)=>{
       const hasTx=r.transcript&&r.transcript.trim();
+      const hasRec=r.recording_ref&&r.recording_ref.trim();
       t+=`<tr>
         <td style="white-space:nowrap">${ts(r.ended_at)}</td>
         <td>${esc(r.phone)}</td>
         <td style="white-space:nowrap">${dur(r.duration_seconds)}</td>
         <td>${badge(r.outcome)}</td>
         <td class="summary-wrap">${r.summary?esc(r.summary):'<span class="no-sum">no summary</span>'}${hasTx?`<button class="tx-btn" onclick="toggle('tx${i}')">transcript ▾</button><div class="tx-box" id="tx${i}">${esc(r.transcript)}</div>`:''}</td>
+        <td style="white-space:nowrap">${hasRec?`<button class="tx-btn" onclick="toggle('rec${i}')">▶ play</button><div class="tx-box" id="rec${i}" style="min-width:220px"><audio controls src="${r.recording_ref}" style="width:100%;margin-top:.2rem" preload="none"></audio></div>`:'<span class="no-sum">—</span>'}</td>
       </tr>`;
     });
     t+='</tbody></table>';
