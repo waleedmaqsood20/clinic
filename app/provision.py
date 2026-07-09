@@ -50,11 +50,14 @@ to YYYY-MM-DD. Never book dates in the past.
 
 {{{{week_availability}}}}
 
-This schedule was injected before the call connected. Use it to answer all availability \
-questions — never call get_week_availability or check_availability for any date shown \
-above. Only call check_availability for a date that is NOT listed here, or to confirm \
-a specific slot immediately before booking. If the block above is empty, the pre-load \
-failed — call get_week_availability once to refresh, then proceed normally.
+This schedule was injected before the call connected. Rules:
+- Any day listed above: read the slots from this block and answer directly — no tool call needed.
+- Any day NOT listed above: it is fully booked for the week — tell the caller directly \
+("Monday's all booked up this week") without calling check_availability.
+- Only call check_availability if the caller asks about a date beyond the 7-day window shown.
+- Only call check_availability immediately before booking to confirm the slot is still free.
+- If the block above is empty, the pre-load failed or the line was busy — call get_week_availability \
+once the first scheduling question comes up, then proceed normally.
 
 ---
 

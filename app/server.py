@@ -131,9 +131,15 @@ async def retell_inbound(request: Request):
     today_str = f"{today.strftime('%A, %B')} {today.day}, {today.year}"
 
     try:
-        week = await asyncio.to_thread(executor.calendar.get_week_availability, "")
+        week = await asyncio.wait_for(
+            asyncio.to_thread(executor.calendar.get_week_availability, ""),
+            timeout=6.0,
+        )
         week_str = format_week_availability(week)
         logger.info("[INBOUND] from=%s week_days=%d today=%s", from_number, len(week), today_str)
+    except asyncio.TimeoutError:
+        logger.warning("[INBOUND] GHL fetch timed out after 6s — returning current_date only")
+        week_str = ""
     except Exception:
         logger.exception("[INBOUND] availability fetch failed — injecting empty variable")
         week_str = ""
