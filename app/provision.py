@@ -20,8 +20,9 @@ import json
 from app import knowledge
 
 RETELL_API = "https://api.retellai.com"
-FUNCTION_URL = os.getenv("RETELL_FUNCTION_URL", "https://YOUR-HOST/retell/function")
-WEBHOOK_URL = os.getenv("RETELL_WEBHOOK_URL", "https://YOUR-HOST/retell/webhook")
+FUNCTION_URL = os.getenv("RETELL_FUNCTION_URL", "https://clinic-xprt.onrender.com/retell/function")
+WEBHOOK_URL = os.getenv("RETELL_WEBHOOK_URL", "https://clinic-xprt.onrender.com/retell/webhook")
+INBOUND_URL = os.getenv("RETELL_INBOUND_URL", "https://clinic-xprt.onrender.com/retell/inbound")
 MODEL = os.getenv("RETELL_MODEL", "claude-4.5-haiku")
 VOICE_ID = os.getenv("RETELL_VOICE_ID", "11labs-Adrian")
 CLINIC = knowledge.CLINIC_PROFILE
@@ -29,6 +30,8 @@ CLINIC = knowledge.CLINIC_PROFILE
 # Known IDs — override via env var if you ever recreate either resource.
 LLM_ID = os.getenv("RETELL_LLM_ID", "llm_9ea568d5a33e1c830c557936ad68")
 AGENT_ID = os.getenv("RETELL_AGENT_ID", "agent_be261fdb7fa638f4d5fec96a5d")
+# Phone number to configure inbound_webhook_url on. Set RETELL_PHONE_NUMBER in .env.
+PHONE_NUMBER = os.getenv("RETELL_PHONE_NUMBER", "")
 
 _SYSTEM_TEMPLATE = """## Role
 
@@ -40,6 +43,18 @@ You're on a live phone call right now. Real conversation. One thought at a time.
 
 Today's date is {{{{current_date}}}}. Always use this year when converting caller-mentioned dates \
 to YYYY-MM-DD. Never book dates in the past.
+
+---
+
+## This Week's Open Slots (pre-loaded — do not fetch these again)
+
+{{{{week_availability}}}}
+
+This schedule was injected before the call connected. Use it to answer all availability \
+questions — never call get_week_availability or check_availability for any date shown \
+above. Only call check_availability for a date that is NOT listed here, or to confirm \
+a specific slot immediately before booking. If the block above is empty, the pre-load \
+failed — call get_week_availability once to refresh, then proceed normally.
 
 ---
 
@@ -134,9 +149,16 @@ When the caller is clearly thinking — says "um", "uh", "let me see", and trail
 without finishing their thought:
 → Say nothing at all. Do not output any text. Just wait.
 
-CRITICAL: When silence is required, your response must contain ZERO tokens — a \
-completely empty output. Do not generate any text, not even a placeholder phrase. \
-Never fill silence with words like "Take your time!" or "Of course!" — output nothing at all.
+When silence is required, respond with EXACTLY this string and nothing else:
+no response needed
+
+Retell detects this exact output and suppresses it from audio — the caller hears \
+silence, not speech. Do not vary the wording, add punctuation, or explain. Never \
+fill silence with "Take your time!" or "Of course!" — output only the signal above.
+
+EXCEPTION: Silence never applies after a tool returns. If a tool just provided a \
+result, always generate a real spoken response using that result — never output \
+the silence signal when you have tool data to deliver.
 
 ## When You Get Interrupted Mid-Sentence
 
@@ -148,19 +170,6 @@ doesn't just cut off and go silent the moment someone nods along.
 If the caller interrupts with a full sentence, a question, or new information — \
 acknowledge the collision briefly ("Oh — sorry, go ahead." / "You were saying?") \
 then let them take over completely. Don't finish your sentence.
-
----
-
-## First Action When a Call Connects
-
-REQUIRED: Before speaking a single word — including the greeting — call \
-get_week_availability. This loads the week's schedule silently. Once the result \
-returns, greet the caller: "{clinic_name}, this is Sarah — just so you know this \
-call may be recorded to support your care. How can I help you today?"
-
-You already have the full week's availability in context — never call \
-check_availability for a date within the loaded week. Only use check_availability \
-for dates beyond the 7-day window, or to confirm a specific slot immediately before booking.
 
 ---
 
@@ -318,10 +327,9 @@ TOOLS = [
            "phone": {"type": "string", "description": "caller's phone number if they provided one"}},
           ["day", "time", "name", "service"]),
     _tool("get_week_availability",
-          "REQUIRED — call this on the very first user turn, before saying anything. "
-          "Returns all open slots for the next 7 days. Once loaded, answer availability "
-          "questions from this context — do not call check_availability for any date "
-          "already covered here. Speak only after the result returns.",
+          "Refresh the week's open slots. Only call this if no slot data appears in your "
+          "context (the pre-load failed) or the caller asks about a date beyond the 7-day "
+          "window. Do not call it when you already have slot data in context.",
           {"service": {"type": "string",
                        "description": "Service type if already known — omit if not yet"}},
           [],
@@ -359,7 +367,10 @@ def build_llm_payload() -> dict:
         "general_tools": TOOLS,
         "model": MODEL,
         "model_temperature": 0.3,
-        "begin_message": None,  # LLM generates greeting after calling get_week_availability
+        "begin_message": (
+            f"{CLINIC['name']}, this is Sarah — just so you know this call may be "
+            "recorded to support your care. How can I help you today?"
+        ),
     }
 
 
@@ -418,12 +429,22 @@ def main() -> int:
         new_agent_ver = max(d["version"] for d in drafts)
         print(f"[2/3] Draft agent version {new_agent_ver} found")
 
-        print(f"[3/3] Publishing agent version {new_agent_ver} ...")
+        print(f"[3/4] Publishing agent version {new_agent_ver} ...")
         from retell import Retell as RetellClient
         rc = RetellClient(api_key=os.environ["RETELL_API_KEY"])
         rc.agent.publish(agent_id, version=new_agent_ver)
-        print(f"[3/3] Agent version {new_agent_ver} published — now live for real calls.")
-        print(f"[OK] Deploy complete: LLM v{new_llm_ver} → Agent v{new_agent_ver} (live)")
+        print(f"[3/4] Agent version {new_agent_ver} published — now live for real calls.")
+
+        phone = PHONE_NUMBER
+        if phone:
+            print(f"[4/4] Setting inbound webhook on {phone} -> {INBOUND_URL} ...")
+            rc.phone_number.update(phone, inbound_webhook_url=INBOUND_URL)
+            print(f"[4/4] Phone number inbound webhook configured.")
+        else:
+            print("[4/4] RETELL_PHONE_NUMBER not set — skipping phone number config.")
+            print("      Set it in .env and re-run --deploy to wire the inbound webhook.")
+
+        print(f"[OK] Deploy complete: LLM v{new_llm_ver} -> Agent v{new_agent_ver} (live)")
         return 0
 
     if "--update-llm" in sys.argv:

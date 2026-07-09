@@ -87,6 +87,23 @@ def _slot_start_utc(slot: Slot) -> dt.datetime:
     return slot.start.replace(tzinfo=tz).astimezone(dt.timezone.utc)
 
 
+def format_week_availability(week: dict) -> str:
+    """Format a {date_str: [Slot]} dict into a readable multi-line string.
+
+    Used both for {{week_availability}} prompt injection (inbound webhook)
+    and for the get_week_availability tool response (mid-call fallback).
+    """
+    if not week:
+        return ""
+    lines = []
+    for date_str in sorted(week.keys()):
+        slots = week[date_str]
+        day = dt.date.fromisoformat(date_str)
+        times = ", ".join(_fmt_time(s.start) for s in slots)
+        lines.append(f"{_fmt_day(day)}: {times}")
+    return "\n".join(lines)
+
+
 # ---------- the actions ----------
 class ToolExecutor:
     def __init__(self, calendar: CalendarProvider, sms: SmsProvider,
@@ -185,13 +202,7 @@ class ToolExecutor:
         week = availability_cache.get(call_id) or self.calendar.get_week_availability(service)
         if not week:
             return "No availability found for the next 7 days. Offer to check a specific day."
-        lines = []
-        for date_str in sorted(week.keys()):
-            slots = week[date_str]
-            day = dt.date.fromisoformat(date_str)
-            times = ", ".join(_fmt_time(s.start) for s in slots)
-            lines.append(f"{_fmt_day(day)}: {times}")
-        return "Week availability:\n" + "\n".join(lines)
+        return "Updated week availability:\n" + format_week_availability(week)
 
     def _check_upcoming(self, caller_phone: str) -> str:
         appts = self.calendar.get_upcoming_appointments(caller_phone)

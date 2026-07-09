@@ -25,7 +25,7 @@ logger = logging.getLogger("clinic")
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 
-from .tools import ToolExecutor, handle_function_call
+from .tools import ToolExecutor, handle_function_call, format_week_availability
 from .providers import GHLCalendar, InMemoryCalendar, SmsProvider, TwilioSms
 from . import db as dbmod, security, availability_cache
 from .call_tracking import persist_from_retell
@@ -83,6 +83,37 @@ async def _prefetch_availability(call_id: str) -> None:
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+@app.post("/retell/inbound")
+async def retell_inbound(request: Request):
+    """Retell inbound call webhook — fires while the phone is still ringing.
+
+    We fetch week availability here and return it as {{week_availability}} so
+    the LLM has the schedule in its prompt before the first turn. The begin_message
+    fires immediately after (static audio, zero latency). No LLM compliance needed.
+    """
+    raw = await request.body()
+    security.verify_retell_request(raw, request.headers.get("x-retell-signature"))
+    body = json.loads(raw or b"{}")
+    call_info = body.get("call_inbound", {})
+    from_number = call_info.get("from_number", "?")
+
+    try:
+        week = await asyncio.to_thread(executor.calendar.get_week_availability, "")
+        week_str = format_week_availability(week)
+        logger.info("[INBOUND] from=%s week_days=%d", from_number, len(week))
+    except Exception:
+        logger.exception("[INBOUND] availability fetch failed — injecting empty variable")
+        week_str = ""
+
+    return JSONResponse(content={
+        "call_inbound": {
+            "dynamic_variables": {
+                "week_availability": week_str
+            }
+        }
+    })
 
 
 @app.post("/retell/function")
