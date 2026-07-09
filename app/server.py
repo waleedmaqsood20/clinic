@@ -16,9 +16,11 @@ DATABASE_URL it stores data in a local SQLite file.
 """
 from __future__ import annotations
 import asyncio
+import datetime as dt
 import os
 import json
 import logging
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("clinic")
 
@@ -88,6 +90,8 @@ async def health():
 @app.get("/dev/test-inbound")
 async def dev_test_inbound():
     """Dev-only: returns exactly what /retell/inbound would inject, no signature needed."""
+    today = dt.datetime.now(ZoneInfo(CLINIC_TZ)).date()
+    today_str = f"{today.strftime('%A, %B')} {today.day}, {today.year}"
     try:
         week = await asyncio.to_thread(executor.calendar.get_week_availability, "")
         week_str = format_week_availability(week)
@@ -96,11 +100,13 @@ async def dev_test_inbound():
         return JSONResponse(content={"error": str(exc)}, status_code=500)
     return JSONResponse(content={
         "days_with_slots": days,
+        "current_date_injected": today_str,
         "week_availability_injected": week_str,
         "retell_payload_sent": {
             "call_inbound": {
-                "dynamic_variables": {
-                    "week_availability": week_str
+                "retell_llm_dynamic_variables": {
+                    "week_availability": week_str,
+                    "current_date": today_str,
                 }
             }
         }
@@ -121,10 +127,13 @@ async def retell_inbound(request: Request):
     call_info = body.get("call_inbound", {})
     from_number = call_info.get("from_number", "?")
 
+    today = dt.datetime.now(ZoneInfo(CLINIC_TZ)).date()
+    today_str = f"{today.strftime('%A, %B')} {today.day}, {today.year}"
+
     try:
         week = await asyncio.to_thread(executor.calendar.get_week_availability, "")
         week_str = format_week_availability(week)
-        logger.info("[INBOUND] from=%s week_days=%d", from_number, len(week))
+        logger.info("[INBOUND] from=%s week_days=%d today=%s", from_number, len(week), today_str)
     except Exception:
         logger.exception("[INBOUND] availability fetch failed — injecting empty variable")
         week_str = ""
@@ -132,7 +141,8 @@ async def retell_inbound(request: Request):
     return JSONResponse(content={
         "call_inbound": {
             "retell_llm_dynamic_variables": {
-                "week_availability": week_str
+                "week_availability": week_str,
+                "current_date": today_str,
             }
         }
     })
