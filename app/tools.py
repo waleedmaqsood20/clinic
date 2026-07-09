@@ -45,7 +45,8 @@ def _parse_day(day_str: str) -> dt.date:
         return dt.date.fromisoformat(s[:10])
     except ValueError:
         pass
-    today = dt.date.today()
+    tz = ZoneInfo(knowledge.CLINIC_PROFILE["timezone"])
+    today = dt.datetime.now(tz).date()
     if "today" in s:
         return today
     if "tomorrow" in s:
@@ -55,6 +56,16 @@ def _parse_day(day_str: str) -> dt.date:
             ahead = (i - today.weekday()) % 7
             return today + dt.timedelta(days=ahead or 7)
     return today + dt.timedelta(days=1)
+
+
+def _guard_past_date(day: dt.date) -> str | None:
+    """Return an error string if day is in the past; None if it's OK to proceed."""
+    tz = ZoneInfo(knowledge.CLINIC_PROFILE["timezone"])
+    today = dt.datetime.now(tz).date()
+    if day < today:
+        return (f"Date error — {_fmt_day(day)} is in the past "
+                f"(today is {_fmt_day(today)}). Re-confirm the date with the caller.")
+    return None
 
 
 def _match_time(slots: list[Slot], time_str: str) -> Slot | None:
@@ -144,6 +155,9 @@ class ToolExecutor:
 
     def _availability(self, day_str: str, service: str) -> str:
         day = _parse_day(day_str)
+        err = _guard_past_date(day)
+        if err:
+            return err
         slots = self.calendar.availability(day, service)
         if not slots:
             return f"No availability on {_fmt_day(day)}. Offer another day."
@@ -153,8 +167,13 @@ class ToolExecutor:
     def _book(self, day_str: str, time_str: str, name: str, service: str,
               reason: str, caller_phone: str, call_id) -> str:
         day = _parse_day(day_str)
+        err = _guard_past_date(day)
+        if err:
+            return err
         # Re-fetch live slots at booking time — the week snapshot may be minutes old
         slots = self.calendar.availability(day, service)
+        if not slots:
+            return f"No open slots on {_fmt_day(day)} — ask the caller for another day."
         slot = _match_time(slots, time_str)
         if not slot:
             return "That time isn't available — offer the caller another slot."
@@ -241,6 +260,9 @@ class ToolExecutor:
             return ("I need the appointment ID to reschedule. "
                     "Please call check_upcoming_appointments first to get it.")
         day = _parse_day(day_str)
+        err = _guard_past_date(day)
+        if err:
+            return err
         slots = self.calendar.availability(day, service or "exam")
         slot = _match_time(slots, time_str)
         if not slot:

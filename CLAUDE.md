@@ -31,11 +31,11 @@ Last updated: 2026-07-09
 | Check upcoming appointments | ✅ Working | Returns event_id, date, time, service, booked_name |
 | Cancel appointment | ✅ Live tested | Confirmed working with real caller (Alex, Jul 2026) |
 | Reschedule appointment | ⚠️ Not tested | Code in place, never tested end-to-end |
-| get_week_availability | ⚠️ Agent v5 live, not yet confirmed by real call | Prefetch cache wired; `call_started` webhook expected |
+| Week availability injection | ⚠️ Agent v6 deployed, not yet confirmed by real call | Inbound webhook → `{{week_availability}}` variable → prompt |
 | SMS confirmation | ⏸ Paused | Client setting up Retell text integration |
 | Staff dashboard | ✅ Live | `/dashboard?token=<DASHBOARD_TOKEN>` |
 | Call tracking | ✅ Working | call_ended + call_analyzed + recording playback |
-| Availability prefetch | ✅ Wired | call_started → cache → sub-100ms tool response |
+| Availability prefetch | ✅ Wired | call_started → cache → sub-100ms tool fallback |
 
 ---
 
@@ -152,15 +152,17 @@ First request after sleep takes ~10–15 seconds. Retell may timeout on the firs
 | `d5cb696` | `get_week_availability` never fired — LLM invoked only after caller spoke, too late to silently prefetch | Removed `begin_message`; LLM now invoked at call-connect with empty conversation, calls tool first then generates greeting |
 | `047715e` | Tool fetch caused dead air on Render cold start | `call_started` webhook triggers background GHL prefetch; `get_week_availability` returns from cache in <100ms |
 | `33c00c1` | All changes since FIX 1 were never live — every `--update-llm` created a draft agent version that real calls never used | Published agent v5 via SDK; added `--deploy` command that patches LLM + publishes in one step; `--update-llm` now warns loudly |
+| (Jul 9 v6) | `get_week_availability` never fired at call-start; "no response needed" spoken mid-call | Rearchitected: inbound call webhook (`POST /retell/inbound`) injects `{{week_availability}}` as dynamic variable before call connects; `begin_message` restored (instant greeting, no LLM compliance required); silence convention restored to `no response needed` string (Retell suppresses TTS on this exact string); `--deploy` now also sets `inbound_webhook_url` on the phone number |
 
 ---
 
 ## Pending work
 
-- [x] **Live cancel test** — confirmed working with real caller (Jul 2026); GHL marks appointment as cancelled
-- [x] **Deploy automation** — `--deploy` command added; `--update-llm` warns loudly if used alone
-- [ ] **Agent v5 live-call test** — v5 never took a real call; confirm get_week_availability fires, no dead air, correct date, no "no response needed"
-- [ ] **Cold-start test** — let Render sleep 15+ min, call, measure dead air before greeting (known risk of begin_message removal)
+- [x] **Live cancel test** — confirmed working with real caller (Alex, Jul 2026)
+- [x] **Deploy automation** — `--deploy` patches LLM + publishes agent + sets phone inbound webhook in one step
+- [x] **Week availability architecture** — rearchitected to inbound webhook + dynamic variable (agent v6 deployed Jul 9)
+- [ ] **Agent v6 live-call test** — confirm: instant greeting (begin_message), Render logs show `[INBOUND]` hit, asking about any day this week causes zero tool calls, "no response needed" is NOT audible (transcript may log it, call should be silent)
+- [ ] **Cold-start test** — let Render sleep 15+ min, call; begin_message restored so greeting is instant even on cold start, but inbound webhook still hits backend → verify it doesn't time out
 - [ ] **Slot-taken test** — book a slot manually, call and request it, confirm Sarah recovers with alternatives
 - [ ] **Reschedule test** — book future appt, call to reschedule, verify GHL updates it (never tested end-to-end)
 - [ ] **Render upgrade** — move to paid tier to eliminate cold-start sleep (real fix for cold-start dead air)
@@ -186,14 +188,16 @@ venv\Scripts\python.exe -m pytest tests\ -v
 
 ```powershell
 $env:RETELL_API_KEY="your_key"
-$env:RETELL_FUNCTION_URL="https://clinic-xprt.onrender.com/retell/function"
 venv\Scripts\python.exe -m app.provision --deploy
 ```
 
-`--deploy` does three things in one command:
+`--deploy` does four things in one command:
 1. PATCHes the LLM (new LLM version created)
 2. Finds the auto-created draft agent version Retell generates after the PATCH
 3. Publishes that draft — making it live for real calls immediately
+4. Sets `inbound_webhook_url` on the phone number (from `RETELL_PHONE_NUMBER` in `.env`)
+
+**Also push code to GitHub** after any changes to `server.py` or `tools.py` — `--deploy` only updates the Retell LLM/agent prompt, not the backend code running on Render.
 
 **Do not use `--update-llm` alone.** It patches the LLM but leaves a draft agent version that real calls never touch. The flag now prints a loud warning if you run it by mistake.
 
