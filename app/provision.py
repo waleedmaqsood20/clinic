@@ -403,51 +403,75 @@ def main() -> int:
                "Content-Type": "application/json"}
 
     if "--deploy" in sys.argv:
-        # Preferred command: patches LLM + immediately publishes the new draft agent version.
-        # --update-llm alone creates a draft that real calls never see; --deploy closes the loop.
+        # Retell locks LLMs and agents once all versions are published — PATCH
+        # /update-retell-llm fails with "Cannot update published LLM". Correct flow:
+        #   1. create_version(base=current) — creates a draft agent + draft LLM version
+        #   2. update that draft LLM version with the new prompt
+        #   3. publish the draft agent version
         idx = sys.argv.index("--deploy")
         args_after = [a for a in sys.argv[idx + 1:] if not a.startswith("--")]
         llm_id = args_after[0] if len(args_after) >= 1 else LLM_ID
         agent_id = args_after[1] if len(args_after) >= 2 else AGENT_ID
 
-        print(f"[1/3] Patching LLM {llm_id} ...")
-        resp = httpx.patch(f"{RETELL_API}/update-retell-llm/{llm_id}",
-                           headers=headers, json=llm_payload, timeout=30.0)
-        if resp.status_code not in (200, 201):
-            print(f"[FAIL] Update LLM failed {resp.status_code}: {resp.text}")
-            return 1
-        new_llm_ver = resp.json().get("version", "?")
-        print(f"[1/3] LLM updated → version {new_llm_ver}")
+        from retell import Retell as RetellClient
+        rc = RetellClient(api_key=os.environ["RETELL_API_KEY"])
 
-        print(f"[2/3] Finding new draft agent version for {agent_id} ...")
+        # Find or create a draft agent version
         list_resp = httpx.get(f"{RETELL_API}/list-agents", headers=headers, timeout=15.0)
         if list_resp.status_code != 200:
             print(f"[FAIL] list-agents failed {list_resp.status_code}: {list_resp.text[:200]}")
             return 1
         all_ver = [a for a in list_resp.json() if a.get("agent_id") == agent_id]
+        published = [a for a in all_ver if a.get("is_published", False)]
         drafts = [a for a in all_ver if not a.get("is_published", True)]
-        if not drafts:
-            print("[FAIL] No draft version found — check Retell dashboard.")
-            return 1
-        new_agent_ver = max(d["version"] for d in drafts)
-        print(f"[2/3] Draft agent version {new_agent_ver} found")
 
-        print(f"[3/4] Publishing agent version {new_agent_ver} ...")
-        from retell import Retell as RetellClient
-        rc = RetellClient(api_key=os.environ["RETELL_API_KEY"])
+        if drafts:
+            new_agent_ver = max(d["version"] for d in drafts)
+            print(f"[1/4] Re-using existing draft agent v{new_agent_ver}")
+        else:
+            base_ver = max(p["version"] for p in published) if published else 0
+            print(f"[1/4] Creating draft from published v{base_ver} ...")
+            rc.agent.create_version(agent_id, base_version=base_ver)
+            list_resp2 = httpx.get(f"{RETELL_API}/list-agents", headers=headers, timeout=15.0)
+            all_ver2 = [a for a in list_resp2.json() if a.get("agent_id") == agent_id]
+            drafts2 = [a for a in all_ver2 if not a.get("is_published", True)]
+            if not drafts2:
+                print("[FAIL] Draft version not found after create_version")
+                return 1
+            new_agent_ver = max(d["version"] for d in drafts2)
+            print(f"[1/4] Draft agent v{new_agent_ver} created")
+
+        print(f"[2/4] Updating LLM {llm_id} v{new_agent_ver} with new prompt ...")
+        llm_result = rc.llm.update(
+            llm_id=llm_id,
+            version=new_agent_ver,
+            general_prompt=llm_payload["general_prompt"],
+            general_tools=llm_payload["general_tools"],
+            model=llm_payload["model"],
+            model_temperature=llm_payload["model_temperature"],
+            begin_message=llm_payload["begin_message"],
+        )
+        print(f"[2/4] LLM v{llm_result.version} updated")
+
+        print(f"[3/4] Publishing agent v{new_agent_ver} ...")
         rc.agent.publish(agent_id, version=new_agent_ver)
-        print(f"[3/4] Agent version {new_agent_ver} published — now live for real calls.")
+        print(f"[3/4] Agent v{new_agent_ver} published — now live for real calls.")
 
         phone = PHONE_NUMBER
         if phone:
-            print(f"[4/4] Setting inbound webhook on {phone} -> {INBOUND_URL} ...")
-            rc.phone_number.update(phone, inbound_webhook_url=INBOUND_URL)
-            print(f"[4/4] Phone number inbound webhook configured.")
+            print(f"[4/4] Configuring {phone}: inbound webhook + latest_published agent ...")
+            rc.phone_number.update(
+                phone,
+                inbound_webhook_url=INBOUND_URL,
+                inbound_agents=[{"agent_id": agent_id, "agent_version": "latest_published",
+                                  "weight": 1}],
+            )
+            print(f"[4/4] Phone set to latest_published — future deploys auto-apply.")
         else:
             print("[4/4] RETELL_PHONE_NUMBER not set — skipping phone number config.")
             print("      Set it in .env and re-run --deploy to wire the inbound webhook.")
 
-        print(f"[OK] Deploy complete: LLM v{new_llm_ver} -> Agent v{new_agent_ver} (live)")
+        print(f"[OK] Deploy complete: LLM v{llm_result.version} -> Agent v{new_agent_ver} (live)")
         return 0
 
     if "--update-llm" in sys.argv:
