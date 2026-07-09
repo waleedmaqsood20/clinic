@@ -103,9 +103,11 @@ async def dev_test_inbound():
         "current_date_injected": today_str,
         "week_availability_injected": week_str,
         "retell_payload_sent": {
-            "retell_llm_dynamic_variables": {
-                "week_availability": week_str,
-                "current_date": today_str,
+            "call_inbound": {
+                "dynamic_variables": {
+                    "week_availability": week_str,
+                    "current_date": today_str,
+                }
             }
         }
     })
@@ -137,9 +139,11 @@ async def retell_inbound(request: Request):
         week_str = ""
 
     return JSONResponse(content={
-        "retell_llm_dynamic_variables": {
-            "week_availability": week_str,
-            "current_date": today_str,
+        "call_inbound": {
+            "dynamic_variables": {
+                "week_availability": week_str,
+                "current_date": today_str,
+            }
         }
     })
 
