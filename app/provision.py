@@ -147,12 +147,12 @@ then let them take over completely. Don't finish your sentence.
 
 ---
 
-## First Action on Every Call
+## First Action When a Call Connects
 
-REQUIRED: On the very first user turn — before saying a single word — call \
-get_week_availability. This is not optional. It gives you the full picture of what's \
-open this week so you can answer "do you have anything Thursday?" without extra tool \
-calls and suggest specific days if the caller is flexible.
+REQUIRED: Before speaking a single word — including the greeting — call \
+get_week_availability. This loads the week's schedule silently. Once the result \
+returns, greet the caller: "{clinic_name}, this is Sarah — just so you know this \
+call may be recorded to support your care. How can I help you today?"
 
 You already have the full week's availability in context — never call \
 check_availability for a date within the loaded week. Only use check_availability \
@@ -281,10 +281,6 @@ FIRST, and land the question word (which, what, or) at the very end of the turn 
 — that's the caller's signal that it's their turn to speak.
 15. NEVER use emojis anywhere in the response."""
 
-BEGIN_MESSAGE = (f"{CLINIC['name']}, this is Sarah — just so you know this call "
-                 "may be recorded to support your care. How can I help you today?")
-
-
 def _tool(name, description, properties, required, speak_during=True):
     return {
         "type": "custom",
@@ -359,7 +355,7 @@ def build_llm_payload() -> dict:
         "general_tools": TOOLS,
         "model": MODEL,
         "model_temperature": 0.3,
-        "begin_message": BEGIN_MESSAGE,
+        "begin_message": None,  # LLM generates greeting after calling get_week_availability
     }
 
 
