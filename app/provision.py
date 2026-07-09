@@ -26,6 +26,10 @@ MODEL = os.getenv("RETELL_MODEL", "claude-4.5-haiku")
 VOICE_ID = os.getenv("RETELL_VOICE_ID", "11labs-Adrian")
 CLINIC = knowledge.CLINIC_PROFILE
 
+# Known IDs — override via env var if you ever recreate either resource.
+LLM_ID = os.getenv("RETELL_LLM_ID", "llm_9ea568d5a33e1c830c557936ad68")
+AGENT_ID = os.getenv("RETELL_AGENT_ID", "agent_be261fdb7fa638f4d5fec96a5d")
+
 _SYSTEM_TEMPLATE = """## Role
 
 You are Sarah — the front desk receptionist at {clinic_name} in Indianapolis, Indiana. \
@@ -384,6 +388,44 @@ def main() -> int:
     headers = {"Authorization": f"Bearer {os.environ['RETELL_API_KEY']}",
                "Content-Type": "application/json"}
 
+    if "--deploy" in sys.argv:
+        # Preferred command: patches LLM + immediately publishes the new draft agent version.
+        # --update-llm alone creates a draft that real calls never see; --deploy closes the loop.
+        idx = sys.argv.index("--deploy")
+        args_after = [a for a in sys.argv[idx + 1:] if not a.startswith("--")]
+        llm_id = args_after[0] if len(args_after) >= 1 else LLM_ID
+        agent_id = args_after[1] if len(args_after) >= 2 else AGENT_ID
+
+        print(f"[1/3] Patching LLM {llm_id} ...")
+        resp = httpx.patch(f"{RETELL_API}/update-retell-llm/{llm_id}",
+                           headers=headers, json=llm_payload, timeout=30.0)
+        if resp.status_code not in (200, 201):
+            print(f"[FAIL] Update LLM failed {resp.status_code}: {resp.text}")
+            return 1
+        new_llm_ver = resp.json().get("version", "?")
+        print(f"[1/3] LLM updated → version {new_llm_ver}")
+
+        print(f"[2/3] Finding new draft agent version for {agent_id} ...")
+        list_resp = httpx.get(f"{RETELL_API}/list-agents", headers=headers, timeout=15.0)
+        if list_resp.status_code != 200:
+            print(f"[FAIL] list-agents failed {list_resp.status_code}: {list_resp.text[:200]}")
+            return 1
+        all_ver = [a for a in list_resp.json() if a.get("agent_id") == agent_id]
+        drafts = [a for a in all_ver if not a.get("is_published", True)]
+        if not drafts:
+            print("[FAIL] No draft version found — check Retell dashboard.")
+            return 1
+        new_agent_ver = max(d["version"] for d in drafts)
+        print(f"[2/3] Draft agent version {new_agent_ver} found")
+
+        print(f"[3/3] Publishing agent version {new_agent_ver} ...")
+        from retell import Retell as RetellClient
+        rc = RetellClient(api_key=os.environ["RETELL_API_KEY"])
+        rc.agent.publish(agent_id, version=new_agent_ver)
+        print(f"[3/3] Agent version {new_agent_ver} published — now live for real calls.")
+        print(f"[OK] Deploy complete: LLM v{new_llm_ver} → Agent v{new_agent_ver} (live)")
+        return 0
+
     if "--update-llm" in sys.argv:
         idx = sys.argv.index("--update-llm")
         if idx + 1 >= len(sys.argv):
@@ -395,7 +437,9 @@ def main() -> int:
         if resp.status_code not in (200, 201):
             print(f"[FAIL] Update LLM failed {resp.status_code}: {resp.text}")
             return 1
-        print(f"[OK] Retell LLM {llm_id} updated with new tools and prompt.")
+        print(f"[OK] Retell LLM {llm_id} updated.")
+        print(f"[WARN] *** DRAFT ONLY — real calls still use the previously published agent version. ***")
+        print(f"[WARN] Run --deploy instead to update + publish in a single step.")
         return 0
 
     if "--update-agent" in sys.argv:
