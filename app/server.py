@@ -15,6 +15,7 @@ creates the contact in your CRM; without them it uses a pretend calendar. With n
 DATABASE_URL it stores data in a local SQLite file.
 """
 from __future__ import annotations
+import asyncio
 import os
 import json
 import logging
@@ -26,7 +27,7 @@ from fastapi.responses import JSONResponse
 
 from .tools import ToolExecutor, handle_function_call
 from .providers import GHLCalendar, InMemoryCalendar, SmsProvider, TwilioSms
-from . import db as dbmod, security
+from . import db as dbmod, security, availability_cache
 from .call_tracking import persist_from_retell
 from .dashboard import make_dashboard_router
 
@@ -64,6 +65,21 @@ executor = ToolExecutor(_make_calendar(), _make_sms(), session_factory=SessionLo
 app.include_router(make_dashboard_router(SessionLocal))
 
 
+async def _prefetch_availability(call_id: str) -> None:
+    """Fetch week availability in the background as soon as a call starts.
+
+    Runs in a thread pool so the blocking GHL HTTP call doesn't touch the event
+    loop. Result is stored in availability_cache keyed by call_id so the first
+    get_week_availability tool call returns in <100ms from cache.
+    """
+    try:
+        week = await asyncio.to_thread(executor.calendar.get_week_availability, "")
+        availability_cache.put(call_id, week)
+        logger.info("[PREFETCH] call_id=%s cached %d days", call_id, len(week))
+    except Exception:
+        logger.exception("[PREFETCH] failed for call_id=%s — tool will fall back to live fetch", call_id)
+
+
 @app.get("/health")
 async def health():
     return {"ok": True}
@@ -89,7 +105,12 @@ async def retell_webhook(request: Request, background: BackgroundTasks):
     body = json.loads(raw or b"{}")
     event = body.get("event")
     call = body.get("call") or {}
-    if event in ("call_ended", "call_analyzed"):
+    if event == "call_started":
+        call_id = call.get("call_id", "")
+        if call_id:
+            background.add_task(_prefetch_availability, call_id)
+            logger.info("[WEBHOOK] call_started call_id=%s — prefetch queued", call_id)
+    elif event in ("call_ended", "call_analyzed"):
         background.add_task(persist_from_retell, SessionLocal, call,
                             event == "call_analyzed")
     return JSONResponse(content={"received": True})

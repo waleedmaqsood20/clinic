@@ -107,7 +107,7 @@ class ToolExecutor:
                               args.get("service", "exam"),
                               args.get("reason", ""), phone, call_id)
         if name == "get_week_availability":
-            return self._week_availability(args.get("service", ""))
+            return self._week_availability(args.get("service", ""), call_id)
         if name == "check_upcoming_appointments":
             return self._check_upcoming(caller_phone)
         if name == "cancel_appointment":
@@ -180,8 +180,9 @@ class ToolExecutor:
             note = ""
         return f"Booked {service} for {name} on {when}. Confirmation {conf}. {note}".strip()
 
-    def _week_availability(self, service: str) -> str:
-        week = self.calendar.get_week_availability(service)
+    def _week_availability(self, service: str, call_id=None) -> str:
+        from . import availability_cache
+        week = availability_cache.get(call_id) or self.calendar.get_week_availability(service)
         if not week:
             return "No availability found for the next 7 days. Offer to check a specific day."
         lines = []
