@@ -136,10 +136,22 @@ class ToolExecutor:
     def _book(self, day_str: str, time_str: str, name: str, service: str,
               reason: str, caller_phone: str, call_id) -> str:
         day = _parse_day(day_str)
+        # Re-fetch live slots at booking time — the week snapshot may be minutes old
         slots = self.calendar.availability(day, service)
         slot = _match_time(slots, time_str)
         if not slot:
             return "That time isn't available — offer the caller another slot."
+        # _match_time falls back to slots[0] when the exact time is gone, which would
+        # silently book the wrong slot. Detect that and return a slot-taken error instead.
+        m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", (time_str or "").lower())
+        if m:
+            h, mn, ap = int(m.group(1)), int(m.group(2) or 0), m.group(3)
+            if ap == "pm" and h < 12: h += 12
+            if ap == "am" and h == 12: h = 0
+            if slot.start.hour != h or slot.start.minute != mn:
+                alts = ", ".join(_fmt_time(s.start) for s in slots[:3])
+                return (f"That slot was just booked by someone else. "
+                        f"Offer another time — nearest available: {alts}.")
         conf = self.calendar.book(slot, name, caller_phone, service)
         when = f"{_fmt_day(slot.start)} at {_fmt_time(slot.start)}"
 
