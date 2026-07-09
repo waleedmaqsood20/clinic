@@ -105,6 +105,7 @@ async def retell_webhook(request: Request, background: BackgroundTasks):
     body = json.loads(raw or b"{}")
     event = body.get("event")
     call = body.get("call") or {}
+    logger.info("[WEBHOOK] event=%s call_id=%s", event, call.get("call_id", "?"))
     if event == "call_started":
         call_id = call.get("call_id", "")
         if call_id:
