@@ -85,6 +85,28 @@ async def health():
     return {"ok": True}
 
 
+@app.get("/dev/test-inbound")
+async def dev_test_inbound():
+    """Dev-only: returns exactly what /retell/inbound would inject, no signature needed."""
+    try:
+        week = await asyncio.to_thread(executor.calendar.get_week_availability, "")
+        week_str = format_week_availability(week)
+        days = len(week)
+    except Exception as exc:
+        return JSONResponse(content={"error": str(exc)}, status_code=500)
+    return JSONResponse(content={
+        "days_with_slots": days,
+        "week_availability_injected": week_str,
+        "retell_payload_sent": {
+            "call_inbound": {
+                "dynamic_variables": {
+                    "week_availability": week_str
+                }
+            }
+        }
+    })
+
+
 @app.post("/retell/inbound")
 async def retell_inbound(request: Request):
     """Retell inbound call webhook — fires while the phone is still ringing.
