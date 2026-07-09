@@ -13,6 +13,8 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
+from sqlalchemy.exc import IntegrityError
+
 from . import crypto, repository
 
 logger = logging.getLogger("clinic")
@@ -102,9 +104,7 @@ def _do_persist(session_factory, call: dict, analyzed: bool) -> None:
     with session_factory() as session:
         booked = repository.booking_exists_for_call(session, call_id)
         outcome = _outcome(call, booked)
-        repository.upsert_call(
-            session,
-            call_id=call_id,
+        upsert_fields = dict(
             phone_hash=crypto.phone_hash(number),
             phone_enc=crypto.encrypt(number),
             ended_reason=call.get("disconnection_reason"),
@@ -118,7 +118,15 @@ def _do_persist(session_factory, call: dict, analyzed: bool) -> None:
             cost_usd=cost,
             ended_at=ended_at,
         )
+        repository.upsert_call(session, call_id=call_id, **upsert_fields)
         repository.write_audit(session, actor="voice_ai", action="call.recorded",
                                call_id=call_id, phi=True,
                                detail={"outcome": outcome, "analyzed": analyzed})
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            # call_ended and call_analyzed fire simultaneously — the other task
+            # already inserted this call_id. Roll back and retry as an update.
+            session.rollback()
+            repository.upsert_call(session, call_id=call_id, **upsert_fields)
+            session.commit()

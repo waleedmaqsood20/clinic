@@ -131,7 +131,7 @@ async def retell_inbound(request: Request):
 
     return JSONResponse(content={
         "call_inbound": {
-            "dynamic_variables": {
+            "retell_llm_dynamic_variables": {
                 "week_availability": week_str
             }
         }
