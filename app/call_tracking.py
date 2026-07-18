@@ -246,8 +246,16 @@ def sync_ghl_appointments(session_factory, calendar) -> dict:
             except Exception:
                 phone = None
 
-            start_utc = dt.datetime.fromtimestamp(int(start_ms) / 1000,
-                                                  tz=dt.timezone.utc)
+            # GHL /calendars/events returns startTime as an ISO-8601 string
+            # (e.g. "2026-07-10T09:00:00-04:00"), not epoch milliseconds.
+            if isinstance(start_ms, (int, float)):
+                start_utc = dt.datetime.fromtimestamp(start_ms / 1000,
+                                                      tz=dt.timezone.utc)
+            else:
+                parsed = dt.datetime.fromisoformat(str(start_ms))
+                start_utc = (parsed if parsed.tzinfo
+                             else parsed.replace(tzinfo=dt.timezone.utc)
+                             ).astimezone(dt.timezone.utc)
             ph = crypto.phone_hash(phone) if phone else None
 
             with session_factory() as session:
