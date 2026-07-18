@@ -263,13 +263,21 @@ def sync_ghl_appointments(session_factory, calendar) -> dict:
 
                 ph = crypto.phone_hash(phone)
 
-                window_start = start_utc - dt.timedelta(minutes=90)
-                window_end = start_utc + dt.timedelta(minutes=15)
+                # Find the most recent call from this phone that ended before
+                # the appointment slot and isn't already linked to another appt.
+                # We look back up to 120 days so callers who booked weeks in
+                # advance (the common case) are still matched.
+                already_linked = (
+                    session.query(Appointment.call_id)
+                    .filter(Appointment.call_id.isnot(None))
+                    .subquery()
+                )
                 matching_call = (
                     session.query(Call)
                     .filter(Call.phone_hash == ph)
-                    .filter(Call.ended_at >= window_start)
-                    .filter(Call.ended_at <= window_end)
+                    .filter(Call.ended_at <= start_utc)
+                    .filter(Call.ended_at >= start_utc - dt.timedelta(days=120))
+                    .filter(~Call.call_id.in_(already_linked))
                     .order_by(Call.ended_at.desc())
                     .first()
                 )
