@@ -192,6 +192,82 @@ def make_dashboard_router(session_factory, sms_provider=None,
             call_tracking.sync_ghl_appointments, session_factory, calendar)
         return JSONResponse(content=result, headers=_SEC_HEADERS)
 
+    @router.get("/api/debug-booking")
+    async def api_debug_booking(request: Request):
+        """Diagnostic: shows exactly what's in DB and what GHL returns."""
+        _auth(request)
+        from . import crypto
+        from .models import Call, Appointment
+        from sqlalchemy import func as sqlfunc
+
+        result: dict = {}
+
+        with session_factory() as session:
+            total_calls  = session.query(sqlfunc.count(Call.id)).scalar() or 0
+            booked_calls = session.query(sqlfunc.count(Call.id)).filter(Call.booked == True).scalar() or 0
+            total_appts  = session.query(sqlfunc.count(Appointment.id)).scalar() or 0
+            linked_appts = session.query(sqlfunc.count(Appointment.id)).filter(Appointment.call_id.isnot(None)).scalar() or 0
+
+            sample_calls = session.query(Call).order_by(Call.ended_at.desc()).limit(5).all()
+            sample_appts = session.query(Appointment).order_by(Appointment.id.desc()).limit(5).all()
+
+            result["db"] = {
+                "total_calls": total_calls,
+                "booked_calls": booked_calls,
+                "total_appointments": total_appts,
+                "linked_appointments": linked_appts,
+                "sample_calls": [
+                    {"call_id": c.call_id, "phone_hash_prefix": (c.phone_hash or "")[:12],
+                     "booked": c.booked, "outcome": c.outcome,
+                     "ended_at": c.ended_at.isoformat() if c.ended_at else None}
+                    for c in sample_calls
+                ],
+                "sample_appointments": [
+                    {"id": a.id, "call_id": a.call_id,
+                     "phone_hash_prefix": (a.phone_hash or "")[:12],
+                     "status": a.status,
+                     "start_utc": a.start_utc.isoformat() if a.start_utc else None,
+                     "ghl_id": a.calcom_booking_uid}
+                    for a in sample_appts
+                ],
+            }
+
+        if calendar is None:
+            result["ghl"] = {"error": "calendar not configured"}
+        else:
+            try:
+                events = calendar.fetch_calendar_events_range(days_back=120, days_ahead=90)
+                result["ghl"] = {"events_fetched": len(events), "sample": []}
+                for ev in events[:5]:
+                    contact_id = ev.get("contactId")
+                    try:
+                        raw   = calendar._get_contact_phone(contact_id) if contact_id else None
+                        e164  = calendar._to_e164(raw) if raw else None
+                        ph    = crypto.phone_hash(e164) if e164 else None
+                    except Exception as ex:
+                        raw = e164 = ph = f"ERR:{ex}"
+                    with session_factory() as session:
+                        call_match = (
+                            session.query(Call).filter(Call.phone_hash == ph).first()
+                            if ph and isinstance(ph, str) else None
+                        )
+                    result["ghl"]["sample"].append({
+                        "event_id": ev.get("id"),
+                        "status": ev.get("appointmentStatus"),
+                        "start_ms": ev.get("startTime"),
+                        "contact_id": contact_id,
+                        "phone_raw": raw,
+                        "phone_e164": e164,
+                        "phone_hash_prefix": ph[:12] if ph and isinstance(ph, str) else ph,
+                        "call_found_in_db": call_match is not None,
+                        "matching_call_id": call_match.call_id if call_match else None,
+                        "matching_call_booked": call_match.booked if call_match else None,
+                    })
+            except Exception as ex:
+                result["ghl"] = {"error": str(ex)}
+
+        return JSONResponse(content=result, headers=_SEC_HEADERS)
+
     @router.get("/api/kpis")
     async def api_kpis(request: Request):
         _auth(request)
