@@ -248,12 +248,43 @@ def sync_ghl_appointments(session_factory, calendar) -> dict:
 
             start_utc = dt.datetime.fromtimestamp(int(start_ms) / 1000,
                                                   tz=dt.timezone.utc)
+            ph = crypto.phone_hash(phone) if phone else None
 
             with session_factory() as session:
                 existing = repository.find_appointment_by_ghl_id(session, event_id)
+
+                # Helper: find an unlinked call from this phone before the slot
+                def _find_call(sess):
+                    if not ph:
+                        return None
+                    taken = (sess.query(Appointment.call_id)
+                             .filter(Appointment.call_id.isnot(None))
+                             .subquery())
+                    return (sess.query(Call)
+                            .filter(Call.phone_hash == ph)
+                            .filter(Call.ended_at <= start_utc)
+                            .filter(Call.ended_at >= start_utc - dt.timedelta(days=120))
+                            .filter(~Call.call_id.in_(taken))
+                            .order_by(Call.ended_at.desc())
+                            .first())
+
                 if existing:
+                    changed = False
                     if existing.status != status:
                         existing.status = status
+                        changed = True
+                    # Re-attempt linking if a previous sync run left call_id=None
+                    if existing.call_id is None:
+                        mc = _find_call(session)
+                        if mc:
+                            existing.call_id = mc.call_id
+                            if not mc.booked:
+                                mc.booked = True
+                                mc.outcome = "booked"
+                                mc.intent = "booking"
+                                linked += 1
+                            changed = True
+                    if changed:
                         updated += 1
                         session.commit()
                     else:
@@ -264,26 +295,7 @@ def sync_ghl_appointments(session_factory, calendar) -> dict:
                     skipped += 1
                     continue
 
-                ph = crypto.phone_hash(phone)
-
-                # Find the most recent call from this phone that ended before
-                # the appointment slot and isn't already linked to another appt.
-                # We look back up to 120 days so callers who booked weeks in
-                # advance (the common case) are still matched.
-                already_linked = (
-                    session.query(Appointment.call_id)
-                    .filter(Appointment.call_id.isnot(None))
-                    .subquery()
-                )
-                matching_call = (
-                    session.query(Call)
-                    .filter(Call.phone_hash == ph)
-                    .filter(Call.ended_at <= start_utc)
-                    .filter(Call.ended_at >= start_utc - dt.timedelta(days=120))
-                    .filter(~Call.call_id.in_(already_linked))
-                    .order_by(Call.ended_at.desc())
-                    .first()
-                )
+                matching_call = _find_call(session)
 
                 appt = Appointment(
                     call_id=matching_call.call_id if matching_call else None,
