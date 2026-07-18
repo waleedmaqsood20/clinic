@@ -21,7 +21,7 @@ Auto-loaded by Claude Code every session. Keep it current. Architecture details 
 
 ## Current working state (update this block after each session)
 
-Last updated: 2026-07-09
+Last updated: 2026-07-13
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -36,6 +36,35 @@ Last updated: 2026-07-09
 | Staff dashboard | ✅ Live | `/dashboard?token=<DASHBOARD_TOKEN>` |
 | Call tracking | ✅ Working | call_ended + call_analyzed + recording playback |
 | Availability prefetch | ✅ Wired | call_started → cache → sub-100ms tool fallback |
+| Appointments tab | ✅ Built (Jul 12) | /api/appointments — upcoming bookings from the appointments table |
+| Call log filters + pagination + CSV | ✅ Built (Jul 12) | outcome/date filters, 50/page, /api/calls.csv export |
+| 14-day trend chart | ✅ Built (Jul 12) | inline SVG, data from /api/kpis daily_trend |
+| Needs-attention flags | ✅ Built (Jul 12) | abandoned / <15s / keyword match; server-side in /api/calls |
+| Daily digest | ✅ Built (Jul 12) | GET /api/digest preview, POST /api/send-digest; env: DIGEST_TO_NUMBER, optional DIGEST_HOUR scheduler (best-effort on free tier) |
+| Dead-letter queue | ✅ Built (Jul 12) | failed_events table; failed webhook persists auto-stored; replay from Issues tab |
+| Deep health check | ✅ Built (Jul 12) | GET /health/deep — DB + GHL + Retell; point uptime pinger here (doubles as keep-warm) |
+| Recording playback (fresh URLs) | ✅ Built (Jul 12) | /api/recording/{call_id} fetches fresh presigned URL per play |
+| Auto-sync scheduler | ✅ Built (Jul 12) | every AUTO_SYNC_HOURS (default 6, 0 disables); needs RETELL_API_KEY |
+| Day-before SMS reminders | ✅ Built (Jul 12) | daily at REMINDER_HOUR (default 16 local) + POST /api/send-reminders + dashboard button; idempotent via appointments.reminder_sent |
+| Insurance intake | ✅ Built (Jul 12) | 'insurance' arg on book_appointment → encrypted in DB + GHL contact note; prompt step 6b added — REQUIRES `--deploy` to go live on the agent |
+| Post-call booking verification | ✅ Built (Jul 12) | call_analyzed → GHL GET appointment; calls.booking_verified; 'unverified' badge + attention flag |
+| New-patient tracking | ✅ Built (Jul 12) | computed from phone_hash history (sync-order safe); NEW badges in calls+appointments, monthly chart, KPI card, digest line |
+| Schema migration | ✅ Built (Jul 12) | db.init_db runs idempotent ADD COLUMNs — safe on existing Postgres |
+| Patient registry | ✅ Built (Jul 13) | patients table keyed by phone_hash; auto-linked on calls+bookings; startup backfill of history (idempotent) |
+| Patient profiles | ✅ Built (Jul 13) | Patients tab: search, per-patient call/appointment history, editable encrypted staff notes; full phone shown in profile (audited: patient.profile_viewed) |
+| Caller recognition | ✅ Built (Jul 13) | /retell/inbound injects {{caller_context}} (name + next appointment) — REQUIRES `--deploy` (prompt changed) |
+| Weekly/monthly reports | ✅ Built (Jul 13) | GET /api/report?period=week|month + POST /api/send-report (SMS to DIGEST_TO_NUMBER); view buttons in Analytics tab |
+| Call analytics | ✅ Built (Jul 13) | Analytics tab: hourly/weekday charts, conversion, abandon, after-hours, FAQ-fallback mining from transcripts |
+| Revenue attribution | ✅ Built (Jul 13) | SERVICE_PRICES_JSON × bookings; KPI card + by-service table; estimates only |
+| No-show tracking | ✅ Built (Jul 13) | sync_appointment_statuses pulls final GHL statuses (piggybacks auto-sync; POST /api/sync-appointment-statuses); no-show rate split by reminder sent |
+| Outbound calls | ✅ Built (Jul 13) | outbound.py → Retell create-phone-call; same agent, {{outbound_purpose}}/{{outbound_context}} activate Outbound Mode in prompt; "Call patient" button, POST /api/call-patient/{id}, POST /api/outbound-confirmations. Needs RETELL_PHONE_NUMBER. REQUIRES --deploy |
+| Waitlist | ✅ Built (Jul 13) | waitlist table; add_to_waitlist voice tool (prompt: offer when day is full); cancel (voice or SMS) auto-offers freed slot via WAITLIST_NOTIFY=sms|call|off; Waitlist tab with manual offer/remove. REQUIRES --deploy |
+| Two-way SMS | ✅ Built (Jul 13) | POST /sms/inbound (set as Twilio Messaging webhook + SMS_WEBHOOK_URL for signature validation); C=confirm, X=cancel (GHL+local+waitlist trigger), R=reschedule flag (+optional outbound call via OUTBOUND_ON_RESCHEDULE=1); reminder text says "Reply C/R/X" |
+| Dashboard logins | ✅ Built (Jul 13) | dashboard_users table, PBKDF2 passwords, signed-cookie sessions (12h, DASHBOARD_SECRET), /login page, admin/staff roles, user mgmt in Admin tab, login throttling, full audit. First admin: DASHBOARD_ADMIN_USER/PASSWORD env. Legacy DASHBOARD_TOKEN still works (admin) — rotate it after users exist |
+| Patient edit + merge | ✅ Built (Jul 13) | PUT /api/patients/{id} (name/insurance/dob/notes); merge two records (second phone number) with full history relink; editable fields + merge UI in profile |
+| Caller context v2 | ✅ Built (Jul 13) | name, visit count, last visit, up to 2 upcoming appts, insurance on file. REQUIRES --deploy |
+| Local status sync | ✅ Built (Jul 13) | voice/SMS cancel + reschedule now update OUR appointment row too (was GHL-only) — keeps profiles, no-show stats and waitlist accurate |
+| Multi-clinic foundation | ✅ Schema ready (Jul 13) | clinics table + clinic_id on patients/calls/appointments; clinic #1 auto-bootstrapped. REMAINING for clinic #2: per-number inbound routing, per-clinic GHL/Retell creds, per-clinic dashboard tokens, clinic_id filters in queries |
 
 ---
 
@@ -168,6 +197,11 @@ First request after sleep takes ~10–15 seconds. Retell may timeout on the firs
 - [ ] **Render upgrade** — move to paid tier to eliminate cold-start sleep (real fix for cold-start dead air)
 - [ ] **Rotate API keys** — rotate GHL token + Retell key (security hygiene)
 - [ ] **SMS** — client setting up Retell text; wire in when ready
+- [ ] **Deploy agent v7+** — caller recognition ({{caller_context}}) AND insurance intake both changed the prompt/tools: run `python -m app.provision --deploy` after pushing
+- [ ] **(superseded, merged above) Deploy agent v7** — insurance intake (tool arg + prompt 6b) needs `python -m app.provision --deploy` after pushing backend
+- [ ] **Twilio creds** — reminders + digest + booking confirmations all no-op silently until TWILIO_* env vars are set
+- [ ] **Digest delivery** — set DIGEST_TO_NUMBER (+ Twilio creds or GHL SMS); set DIGEST_HOUR only after Render paid tier, else use external cron on POST /api/send-digest
+- [ ] **/api/calls response shape changed (Jul 12)** — now {rows, total, offset, limit}; test_stage1.py updated accordingly
 - [ ] **Key rotation** — `ENCRYPTION_KEY`, `PHONE_HASH_HMAC_KEY` to proper secrets manager
 
 ---

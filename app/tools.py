@@ -133,7 +133,8 @@ class ToolExecutor:
             return self._book(args.get("day", ""), args.get("time", ""),
                               args.get("name", "the caller"),
                               args.get("service", "exam"),
-                              args.get("reason", ""), phone, call_id)
+                              args.get("reason", ""), phone, call_id,
+                              insurance=args.get("insurance", ""))
         if name == "get_week_availability":
             return self._week_availability(args.get("service", ""), call_id)
         if name == "check_upcoming_appointments":
@@ -144,6 +145,13 @@ class ToolExecutor:
             return self._reschedule(args.get("event_id", ""),
                                     args.get("new_day", ""), args.get("new_time", ""),
                                     args.get("service", ""))
+        if name == "add_to_waitlist":
+            phone = args.get("phone") or caller_phone
+            return self._add_to_waitlist(args.get("name", ""),
+                                         args.get("service", "exam"),
+                                         args.get("preferred_day", ""),
+                                         args.get("time_preference", ""),
+                                         phone, call_id)
         return f"Unknown tool {name}."
 
     def _faq(self, query: str) -> str:
@@ -165,7 +173,8 @@ class ToolExecutor:
         return f"Available on {_fmt_day(day)}: {times}."
 
     def _book(self, day_str: str, time_str: str, name: str, service: str,
-              reason: str, caller_phone: str, call_id) -> str:
+              reason: str, caller_phone: str, call_id,
+              insurance: str = "") -> str:
         day = _parse_day(day_str)
         err = _guard_past_date(day)
         if err:
@@ -195,17 +204,36 @@ class ToolExecutor:
             try:
                 from . import repository
                 with self.session_factory() as session:
-                    repository.record_booking(
+                    appt = repository.record_booking(
                         session, call_id=call_id, caller_phone=caller_phone,
                         name=name, service=service, reason=reason,
+                        insurance=insurance or None,
                         start_utc=_slot_start_utc(slot), confirmation=conf)
+                    patient = repository.upsert_patient(
+                        session, phone=caller_phone, name=name,
+                        insurance=insurance or None)
+                    if patient:
+                        appt.patient_id = patient.id
                     repository.write_audit(
                         session, actor="voice_ai", action="appointment.created",
                         call_id=call_id, phi=True,
                         detail={"service": service, "when": when})
                     session.commit()
             except Exception:
-                pass
+                logger.exception("[BOOK] failed to persist booking for call %s", call_id)
+
+        # Intake note on the CRM contact (reason + insurance). Best-effort —
+        # a note failure must never break a successful booking.
+        if reason or insurance:
+            try:
+                parts = [f"Booked via voice AI: {service} on {when}."]
+                if reason:
+                    parts.append(f"Reason: {reason}.")
+                if insurance:
+                    parts.append(f"Insurance: {insurance}.")
+                self.calendar.add_contact_note(caller_phone, " ".join(parts))
+            except Exception:
+                logger.exception("[BOOK] intake note failed for call %s", call_id)
 
         try:
             self.sms.send(caller_phone,
@@ -252,6 +280,8 @@ class ToolExecutor:
             return ("I need the appointment ID to cancel. "
                     "Please call check_upcoming_appointments first to get it.")
         self.calendar.cancel(event_id)
+        freed = self._sync_local_status(event_id, "cancelled")
+        self._offer_freed_slot(freed)
         return "Done — that appointment has been cancelled. We hope to see you again soon."
 
     def _reschedule(self, event_id: str, day_str: str, time_str: str,
@@ -268,8 +298,118 @@ class ToolExecutor:
         if not slot:
             return "That time isn't available — offer the caller another slot."
         self.calendar.reschedule(event_id, slot)
+        # keep the local row accurate: new time, reminder re-armed
+        if self.session_factory:
+            try:
+                from . import repository
+                with self.session_factory() as session:
+                    appt = repository.find_appointment_by_ghl_id(session, event_id)
+                    if appt:
+                        appt.start_utc = _slot_start_utc(slot)
+                        appt.status = "confirmed"
+                        appt.reminder_sent = False
+                    session.commit()
+            except Exception:
+                logger.exception("[RESCHEDULE] local sync failed for %s", event_id)
         when = f"{_fmt_day(slot.start)} at {_fmt_time(slot.start)}"
         return f"Done — your appointment has been moved to {when}."
+
+    def _sync_local_status(self, event_id: str, status: str):
+        """Mirror a GHL change onto our Appointment row. Returns the row
+        (with freed-slot info) or None."""
+        if not self.session_factory:
+            return None
+        try:
+            from . import repository
+            with self.session_factory() as session:
+                appt = repository.find_appointment_by_ghl_id(session, event_id)
+                if appt is None:
+                    return None
+                appt.status = status
+                info = {"service": appt.service, "start_utc": appt.start_utc}
+                session.commit()
+                return info
+        except Exception:
+            logger.exception("[CANCEL] local sync failed for %s", event_id)
+            return None
+
+    def _offer_freed_slot(self, freed: dict | None) -> None:
+        """A slot opened up — offer it to the best-matching waitlist entry.
+        WAITLIST_NOTIFY: sms (default) | call | off."""
+        import os
+        if not freed or not self.session_factory:
+            return
+        mode = os.getenv("WAITLIST_NOTIFY", "sms").lower()
+        if mode == "off":
+            return
+        try:
+            from . import repository, crypto, knowledge
+            start = freed.get("start_utc")
+            if start is not None and start.tzinfo is None:
+                start = start.replace(tzinfo=dt.timezone.utc)
+            tz = ZoneInfo(knowledge.CLINIC_PROFILE["timezone"])
+            local = start.astimezone(tz) if start else None
+            day_iso = local.date().isoformat() if local else None
+            slot_detail = (f"{_fmt_day(local.date())} at {_fmt_time(local)}"
+                           if local else "a newly opened time")
+            with self.session_factory() as session:
+                entry = repository.match_waitlist(
+                    session, service=freed.get("service"), day=day_iso)
+                if entry is None:
+                    return
+                phone = crypto.decrypt(entry.phone_enc)
+                name = None
+                try:
+                    name = crypto.decrypt(entry.name_enc)
+                except Exception:
+                    pass
+                entry_id, service = entry.id, entry.service
+            if mode == "call":
+                from . import outbound
+                result = outbound.offer_slot_to_waitlist(
+                    phone, name, service, slot_detail)
+                ok = result.get("ok", False)
+            else:
+                self.sms.send(phone,
+                              f"{knowledge.CLINIC_PROFILE['name']}: a "
+                              f"{service or 'appointment'} slot just opened "
+                              f"{slot_detail}. Call us to grab it!")
+                ok = True
+            if ok:
+                with self.session_factory() as session:
+                    repository.set_waitlist_status(session, entry_id, "offered",
+                                                   offered_detail=slot_detail)
+                    session.commit()
+                logger.info("[WAITLIST] offered %s to entry %s via %s",
+                            slot_detail, entry_id, mode)
+        except Exception:
+            logger.exception("[WAITLIST] offer failed")
+
+    def _add_to_waitlist(self, name: str, service: str, preferred_day: str,
+                         time_preference: str, caller_phone: str, call_id) -> str:
+        if not self.session_factory:
+            return "Waitlist isn't available right now — offer to take a message instead."
+        day_iso = None
+        if (preferred_day or "").strip():
+            try:
+                day_iso = _parse_day(preferred_day).isoformat()
+            except Exception:
+                day_iso = None
+        try:
+            from . import repository
+            with self.session_factory() as session:
+                repository.add_waitlist_entry(
+                    session, phone=caller_phone, name=name or None,
+                    service=service, preferred_day=day_iso,
+                    time_note=(time_preference or None), call_id=call_id)
+                session.commit()
+        except Exception:
+            logger.exception("[WAITLIST] add failed")
+            return ("I couldn't add you to the waitlist just now — "
+                    "offer to take a message instead.")
+        day_part = f" for {preferred_day}" if day_iso else ""
+        return (f"Added to the waitlist{day_part}. Tell the caller we'll reach "
+                f"out the moment a {service} slot opens up.")
 
 
 # ---------- the function Retell talks to ----------

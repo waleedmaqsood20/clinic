@@ -32,8 +32,121 @@ def _outcome(call: dict, booked: bool) -> str:
 def persist_from_retell(session_factory, call: dict, analyzed: bool) -> None:
     try:
         _do_persist(session_factory, call, analyzed)
-    except Exception:
+    except Exception as exc:
         logger.exception("[RETELL] persist_from_retell failed for call %s", call.get("call_id"))
+        _dead_letter(session_factory, call, exc)
+
+
+def _dead_letter(session_factory, call: dict, exc: Exception) -> None:
+    """Store the raw payload so a failed webhook can be replayed later."""
+    try:
+        with session_factory() as session:
+            repository.record_failed_event(
+                session, source="retell_webhook", call_id=call.get("call_id"),
+                payload=call, error=f"{type(exc).__name__}: {exc}")
+            session.commit()
+    except Exception:
+        logger.exception("[DEAD-LETTER] could not store failed event %s",
+                         call.get("call_id"))
+
+
+def verify_booking(session_factory, calendar, call_id: str) -> None:
+    """Post-call verification: a call marked 'booked' must have a matching,
+    non-cancelled appointment in GHL. Catches silent booking failures.
+
+    Sets Call.booking_verified: True (found + active), False (missing or
+    cancelled in GHL), None (couldn't check — GHL error, no change).
+    """
+    from .models import Appointment, Call
+
+    with session_factory() as session:
+        db_call = session.query(Call).filter_by(call_id=call_id).one_or_none()
+        if db_call is None or not db_call.booked:
+            return
+        appt = (session.query(Appointment)
+                .filter_by(call_id=call_id)
+                .order_by(Appointment.id.desc()).first())
+        ghl_id = appt.calcom_booking_uid if appt else None
+
+    if not ghl_id:
+        verified = False        # we recorded 'booked' but have no appointment row
+    else:
+        try:
+            event = calendar.get_appointment(ghl_id)
+        except Exception:
+            logger.exception("[VERIFY] GHL lookup failed for %s — leaving unverified",
+                             call_id)
+            return
+        status = (event or {}).get("appointmentStatus", "")
+        verified = bool(event) and status not in ("cancelled", "invalid", "noshow")
+
+    with session_factory() as session:
+        db_call = session.query(Call).filter_by(call_id=call_id).one_or_none()
+        if db_call is None:
+            return
+        db_call.booking_verified = verified
+        if not verified:
+            repository.write_audit(session, actor="system",
+                                   action="booking.verification_failed",
+                                   call_id=call_id, phi=False,
+                                   detail={"ghl_appointment_id": ghl_id})
+        session.commit()
+    logger.info("[VERIFY] call=%s booking_verified=%s", call_id, verified)
+
+
+def sync_appointment_statuses(session_factory, calendar) -> dict:
+    """No-show tracking: pull final statuses from GHL for past appointments
+    still marked 'confirmed' in our DB (completed / noshow / cancelled)."""
+    import datetime as dt
+    from .models import Appointment
+    now = dt.datetime.now(dt.timezone.utc)
+    updated = checked = errors = 0
+    with session_factory() as session:
+        past = (session.query(Appointment)
+                .filter(Appointment.start_utc < now)
+                .filter(Appointment.status == "confirmed")
+                .filter(Appointment.calcom_booking_uid.isnot(None))
+                .limit(200).all())
+        for a in past:
+            checked += 1
+            try:
+                event = calendar.get_appointment(a.calcom_booking_uid)
+            except Exception:
+                logger.exception("[STATUS-SYNC] GHL lookup failed for appt %s", a.id)
+                errors += 1
+                continue
+            if event is None:
+                a.status = "cancelled"          # gone from GHL
+                updated += 1
+                continue
+            status = (event.get("appointmentStatus") or "").lower()
+            if status and status != "confirmed":
+                a.status = "noshow" if status in ("noshow", "no_show") else status
+                updated += 1
+        session.commit()
+    logger.info("[STATUS-SYNC] checked=%d updated=%d errors=%d",
+                checked, updated, errors)
+    return {"checked": checked, "updated": updated, "errors": errors}
+
+
+def replay_failed_event(session_factory, event_id: int) -> dict:
+    """Re-run _do_persist for a dead-lettered payload; mark replayed on success."""
+    from .models import FailedEvent
+    with session_factory() as session:
+        ev = session.get(FailedEvent, event_id)
+        if ev is None:
+            return {"ok": False, "error": "event not found"}
+        payload = dict(ev.payload or {})
+    try:
+        _do_persist(session_factory, payload, analyzed=True)
+    except Exception as exc:
+        logger.exception("[DEAD-LETTER] replay failed for event %s", event_id)
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    with session_factory() as session:
+        ev = session.get(FailedEvent, event_id)
+        ev.replayed = True
+        session.commit()
+    return {"ok": True, "call_id": payload.get("call_id")}
 
 
 def _normalize_ms(v) -> int | None:
@@ -70,7 +183,6 @@ def sync_from_retell_api(session_factory, retell_api_key: str) -> dict:
         calls = r.json()
         if not calls:
             break
-        new_count = 0
         for call in calls:
             try:
                 # normalise timestamps before passing to _do_persist
@@ -78,12 +190,13 @@ def sync_from_retell_api(session_factory, retell_api_key: str) -> dict:
                     if call.get(ts_field) is not None:
                         call[ts_field] = _normalize_ms(call[ts_field])
                 _do_persist(session_factory, call, analyzed=True)
-                new_count += 1
                 synced += 1
             except Exception:
                 logger.exception("sync: failed to persist call %s", call.get("call_id"))
                 skipped += 1
-        if not new_count:
+        # Stop only when Retell returns a short (final) page — a page whose
+        # rows all failed to persist must not silently abort pagination.
+        if len(calls) < 100:
             break
         pagination_key = calls[-1]["call_id"]
 
@@ -104,7 +217,10 @@ def _do_persist(session_factory, call: dict, analyzed: bool) -> None:
     with session_factory() as session:
         booked = repository.booking_exists_for_call(session, call_id)
         outcome = _outcome(call, booked)
+        patient = repository.upsert_patient(session, phone=number,
+                                            first_seen_at=ended_at)
         upsert_fields = dict(
+            patient_id=patient.id if patient else None,
             phone_hash=crypto.phone_hash(number),
             phone_enc=crypto.encrypt(number),
             ended_reason=call.get("disconnection_reason"),

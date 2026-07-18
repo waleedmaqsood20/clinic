@@ -88,8 +88,13 @@ def main():
     check("FAQ result is a string with hours", "open" in result_text.lower())
 
     # 3) Booking persists (encrypted) + audit
+    # Use a computed future weekday — a hardcoded date rots (the past-date
+    # guard correctly rejects it once the date passes), and Sundays are closed.
+    _day = dt.date.today() + dt.timedelta(days=7)
+    while _day.weekday() == 6:
+        _day += dt.timedelta(days=1)
     r = client.post("/retell/function", json=fn("book_appointment",
-        {"day": "2026-06-16", "time": "10am", "name": "Sarah Jones",
+        {"day": _day.isoformat(), "time": "10am", "name": "Sarah Jones",
          "service": "cleaning", "reason": "tooth pain"}))
     result_text = r.json().get("result", "") if isinstance(r.json(), dict) else r.json()
     check("Booking result confirms", "Booked" in result_text)
@@ -134,8 +139,10 @@ def main():
     r = client.get("/api/calls")
     check("Dashboard rejects missing token (401)", r.status_code == 401)
     r = client.get("/api/calls", headers={"x-dashboard-token": "dash-secret"})
-    rows = r.json()
-    check("Dashboard lists the call", r.status_code == 200 and len(rows) == 1)
+    data = r.json()
+    rows = data["rows"]
+    check("Dashboard lists the call",
+          r.status_code == 200 and len(rows) == 1 and data["total"] == 1)
     if rows:
         check("Phone masked to last 4",
               rows[0]["phone"].endswith("1234") and "317555" not in rows[0]["phone"])

@@ -23,8 +23,17 @@ from app.providers import InMemoryCalendar, SmsProvider
 # Use clinic-timezone dates so the past-date guard never rejects test inputs
 _tz = _ZI(knowledge.CLINIC_PROFILE["timezone"])
 _today = _dt.datetime.now(_tz).date()
-_TEST_DAY = (_today + _dt.timedelta(days=7)).isoformat()   # next week, always future
-_TEST_DAY2 = (_today + _dt.timedelta(days=8)).isoformat()  # day after
+def _next_open_day(start):
+    """Skip Sundays — the clinic (and InMemoryCalendar) is closed, so a test
+    date landing on Sunday would fail with 'No availability'."""
+    while start.weekday() == 6:
+        start += _dt.timedelta(days=1)
+    return start
+
+_d1 = _next_open_day(_today + _dt.timedelta(days=7))    # next week, always future
+_d2 = _next_open_day(_d1 + _dt.timedelta(days=1))       # day after (also open)
+_TEST_DAY = _d1.isoformat()
+_TEST_DAY2 = _d2.isoformat()
 
 ok = True
 

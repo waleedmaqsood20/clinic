@@ -47,6 +47,14 @@ class CalendarProvider:
         """Move appointment to new_slot by event_id. Returns event_id or raises RuntimeError."""
         return "no_appointment"
 
+    def get_appointment(self, event_id: str) -> dict | None:
+        """Fetch one appointment by id. Returns the event dict, or None if not found."""
+        return None
+
+    def add_contact_note(self, phone: str, note: str) -> bool:
+        """Attach a note to the CRM contact for this phone. Returns True on success."""
+        return False
+
 
 class InMemoryCalendar(CalendarProvider):
     """Fake calendar (open 9-17, 30-min slots). Used when no GHL keys are set."""
@@ -91,6 +99,16 @@ class InMemoryCalendar(CalendarProvider):
 
     def reschedule(self, event_id: str, new_slot: Slot) -> str:
         return event_id
+
+    def get_appointment(self, event_id: str) -> dict | None:
+        for b in self.bookings:
+            if b["id"] == event_id:
+                return {"id": event_id, "appointmentStatus": "confirmed"}
+        return None
+
+    def add_contact_note(self, phone: str, note: str) -> bool:
+        self.bookings.append({"note_for": phone, "note": note})
+        return True
 
 
 class GHLCalendar(CalendarProvider):
@@ -325,6 +343,41 @@ class GHLCalendar(CalendarProvider):
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"GHL reschedule failed {resp.status_code}: {resp.text}")
         return event_id
+
+    def get_appointment(self, event_id: str) -> dict | None:
+        """GET one appointment by id — used for post-call booking verification."""
+        resp = self.client.get(
+            f"{self.BASE}/calendars/events/appointments/{event_id}",
+            headers=self._headers())
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"GHL get appointment failed {resp.status_code}: {resp.text[:200]}")
+        d = resp.json() or {}
+        return d.get("appointment") or d.get("event") or d
+
+    def add_contact_note(self, phone: str, note: str) -> bool:
+        """Attach an intake note (reason/insurance) to the CRM contact.
+
+        Uses POST /contacts/{id}/notes — works on any GHL account without
+        pre-configured custom fields. Failure never breaks a booking.
+        """
+        try:
+            contact_id = self._find_contact_by_phone(phone)
+            if not contact_id:
+                logger.warning("GHL note: no contact found for %s", phone)
+                return False
+            resp = self.client.post(
+                f"{self.BASE}/contacts/{contact_id}/notes",
+                headers=self._headers(), json={"body": note})
+            if resp.status_code not in (200, 201):
+                logger.error("GHL note failed %s: %s", resp.status_code, resp.text[:200])
+                return False
+            return True
+        except Exception:
+            logger.exception("GHL add_contact_note failed")
+            return False
 
     def book(self, slot: Slot, name: str, phone: str, service: str) -> str:
         contact_id = self._upsert_contact(name, phone)

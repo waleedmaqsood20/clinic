@@ -9,3 +9,8 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# local SQLite dev database
+clinic.db
+clinic.db-journal
+*.db-journal
