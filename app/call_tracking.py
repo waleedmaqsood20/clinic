@@ -239,7 +239,10 @@ def sync_ghl_appointments(session_factory, calendar) -> dict:
                 continue
 
             try:
-                phone = calendar._get_contact_phone(contact_id) if contact_id else None
+                phone_raw = calendar._get_contact_phone(contact_id) if contact_id else None
+                # Normalize to E.164 so phone_hash matches what _do_persist stored
+                # (Retell always sends E.164; GHL may return bare digits or formatted)
+                phone = calendar._to_e164(phone_raw) if phone_raw else None
             except Exception:
                 phone = None
 
