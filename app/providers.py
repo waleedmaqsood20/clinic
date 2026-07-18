@@ -357,6 +357,36 @@ class GHLCalendar(CalendarProvider):
         d = resp.json() or {}
         return d.get("appointment") or d.get("event") or d
 
+    def _get_contact_phone(self, contact_id: str) -> str | None:
+        """Fetch a contact by ID and return their phone number."""
+        if not contact_id:
+            return None
+        r = self.client.get(f"{self.BASE}/contacts/{contact_id}",
+                            headers=self._headers())
+        if r.status_code != 200:
+            logger.warning("GHL get contact %s → %s", contact_id, r.status_code)
+            return None
+        d = (r.json() or {}).get("contact") or r.json() or {}
+        return d.get("phone") or None
+
+    def fetch_calendar_events_range(self, days_back: int = 120,
+                                    days_ahead: int = 90) -> list[dict]:
+        """Fetch GHL calendar events spanning past + future (for sync)."""
+        now = dt.datetime.now(dt.timezone.utc)
+        start_ms = int((now - dt.timedelta(days=days_back)).timestamp() * 1000)
+        end_ms = int((now + dt.timedelta(days=days_ahead)).timestamp() * 1000)
+        resp = self.client.get(
+            f"{self.BASE}/calendars/events",
+            headers=self._headers(),
+            params={"locationId": self.location_id,
+                    "calendarId": self.calendar_id,
+                    "startTime": start_ms, "endTime": end_ms},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"GHL calendar events failed {resp.status_code}: {resp.text[:300]}")
+        return (resp.json() or {}).get("events") or []
+
     def add_contact_note(self, phone: str, note: str) -> bool:
         """Attach an intake note (reason/insurance) to the CRM contact.
 

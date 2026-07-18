@@ -182,6 +182,16 @@ def make_dashboard_router(session_factory, sms_provider=None,
             call_tracking.sync_from_retell_api, session_factory, api_key)
         return JSONResponse(content=result, headers=_SEC_HEADERS)
 
+    @router.post("/api/sync-ghl-appointments")
+    async def api_sync_ghl_appointments(request: Request):
+        _auth(request)
+        if calendar is None:
+            raise HTTPException(503, "GHL calendar not configured")
+        import asyncio
+        result = await asyncio.to_thread(
+            call_tracking.sync_ghl_appointments, session_factory, calendar)
+        return JSONResponse(content=result, headers=_SEC_HEADERS)
+
     @router.get("/api/kpis")
     async def api_kpis(request: Request):
         _auth(request)
@@ -857,6 +867,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <span class="spacer"></span>
   <button class="btn btn-primary" onclick="loadAll()">Refresh</button>
   <button class="btn" id="sync-btn" onclick="syncRetell()">Sync History</button>
+  <button class="btn" id="sync-ghl-btn" onclick="syncGhlAppts()" title="Pull GHL appointments into local DB and fix booking stats">Sync GHL Appts</button>
   <button class="btn" onclick="exportCsv()">Export CSV</button>
   <button class="btn" id="digest-btn" onclick="sendDigest()">Send Digest</button>
   <button class="btn" id="remind-btn" onclick="sendReminders()">Send Reminders</button>
@@ -1203,6 +1214,23 @@ async function syncRetell(){
   }catch(e){
     btn.textContent='Failed';
     setTimeout(()=>{btn.textContent='Sync History';btn.disabled=false},3000);
+  }
+}
+
+async function syncGhlAppts(){
+  const btn=document.getElementById('sync-ghl-btn');
+  btn.disabled=true;btn.textContent='Syncing GHL…';
+  try{
+    const r=await fetch('/api/sync-ghl-appointments?'+tok(),{method:'POST'});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(d.error){throw new Error(d.error)}
+    btn.textContent=`Done — ${d.appointments_created} created, ${d.calls_linked} calls fixed`;
+    setTimeout(()=>{btn.textContent='Sync GHL Appts';btn.disabled=false},6000);
+    loadAll();
+  }catch(e){
+    toast('GHL sync failed: '+e.message);
+    btn.textContent='Sync GHL Appts';btn.disabled=false;
   }
 }
 

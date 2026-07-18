@@ -204,6 +204,107 @@ def sync_from_retell_api(session_factory, retell_api_key: str) -> dict:
     return {"synced": synced, "skipped": skipped}
 
 
+def sync_ghl_appointments(session_factory, calendar) -> dict:
+    """Pull GHL appointments (past 120 days + next 90) into local DB.
+
+    Fixes the silent-failure window when appointments.status was missing:
+    GHL had the bookings, our DB didn't. After running this, Call.booked
+    and Call.outcome are corrected and the KPI booking rate is accurate.
+    """
+    import datetime as dt
+    from . import crypto, repository
+    from .models import Appointment, Call
+
+    if not hasattr(calendar, "fetch_calendar_events_range"):
+        return {"error": "GHL not configured"}
+
+    try:
+        events = calendar.fetch_calendar_events_range(days_back=120, days_ahead=90)
+    except Exception as exc:
+        logger.exception("[GHL-SYNC] fetch failed")
+        return {"error": str(exc)}
+
+    created = updated = linked = skipped = 0
+
+    for e in events:
+        event_id = e.get("id")
+        contact_id = e.get("contactId")
+        status = (e.get("appointmentStatus") or "confirmed").lower()
+        start_ms = e.get("startTime")
+        service = e.get("title") or ""
+
+        if not event_id or not start_ms:
+            skipped += 1
+            continue
+
+        try:
+            phone = calendar._get_contact_phone(contact_id) if contact_id else None
+        except Exception:
+            phone = None
+
+        start_utc = dt.datetime.fromtimestamp(int(start_ms) / 1000,
+                                              tz=dt.timezone.utc)
+
+        with session_factory() as session:
+            existing = repository.find_appointment_by_ghl_id(session, event_id)
+            if existing:
+                if existing.status != status:
+                    existing.status = status
+                    updated += 1
+                    session.commit()
+                else:
+                    skipped += 1
+                continue
+
+            if not phone:
+                skipped += 1
+                continue
+
+            ph = crypto.phone_hash(phone)
+
+            # Find call from same phone that ended within 90 min before the slot
+            window_start = start_utc - dt.timedelta(minutes=90)
+            window_end = start_utc + dt.timedelta(minutes=15)
+            matching_call = (
+                session.query(Call)
+                .filter(Call.phone_hash == ph)
+                .filter(Call.ended_at >= window_start)
+                .filter(Call.ended_at <= window_end)
+                .order_by(Call.ended_at.desc())
+                .first()
+            )
+
+            appt = Appointment(
+                call_id=matching_call.call_id if matching_call else None,
+                service=service,
+                start_utc=start_utc,
+                calcom_booking_uid=event_id,
+                caller_phone_enc=crypto.encrypt(phone),
+                caller_name_enc=None,
+                reason_enc=None,
+                phone_hash=ph,
+                status=status,
+            )
+            patient = repository.upsert_patient(session, phone=phone)
+            if patient:
+                appt.patient_id = patient.id
+            session.add(appt)
+
+            if matching_call and not matching_call.booked:
+                matching_call.booked = True
+                matching_call.outcome = "booked"
+                matching_call.intent = "booking"
+                linked += 1
+
+            session.commit()
+            created += 1
+
+    logger.info("[GHL-SYNC] events=%d created=%d updated=%d linked=%d skipped=%d",
+                len(events), created, updated, linked, skipped)
+    return {"events_from_ghl": len(events), "appointments_created": created,
+            "statuses_updated": updated, "calls_linked": linked, "skipped": skipped}
+
+
 def _do_persist(session_factory, call: dict, analyzed: bool) -> None:
     call_id = call.get("call_id")
     number = call.get("from_number") or ""
