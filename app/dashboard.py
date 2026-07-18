@@ -1423,8 +1423,6 @@ async function disableUser(id){
   }catch(e){toast('Disable failed: '+e.message)}
 }
 
-async function sendReminders(){
-
 // ---- Analytics ----
 function barChart(values,labels,color,h=100){
   const W=1100,PAD=4,n=values.length,max=Math.max(1,...values);
