@@ -33,13 +33,14 @@ _COLUMN_MIGRATIONS = [
     ("calls", "booking_verified", "BOOLEAN", "BOOLEAN"),
     # patient registry + multi-clinic (Jul 2026)
     ("appointments", "clinic_id", "INTEGER DEFAULT 1", "INTEGER DEFAULT 1"),
+    ("appointments", "patient_id", "INTEGER", "INTEGER"),
+    ("appointments", "status", "VARCHAR DEFAULT 'confirmed'", "VARCHAR DEFAULT 'confirmed'"),
     ("calls", "patient_id", "INTEGER", "INTEGER"),
     ("calls", "clinic_id", "INTEGER DEFAULT 1", "INTEGER DEFAULT 1"),
 ]
 
-# appointments.patient_id predates this migration system (was VARCHAR,
-# 'reserved for Stage 2'); Postgres can retype it, SQLite compares loosely
-# so the VARCHAR column works as-is with integer values.
+# appointments.patient_id and appointments.status were added Jul 2026 alongside
+# the patient registry. Postgres can retype patient_id if it was previously VARCHAR.
 _TYPE_FIXES_PG = [
     ("appointments", "patient_id",
      "ALTER TABLE appointments ALTER COLUMN patient_id "
