@@ -357,17 +357,25 @@ class GHLCalendar(CalendarProvider):
         d = resp.json() or {}
         return d.get("appointment") or d.get("event") or d
 
-    def _get_contact_phone(self, contact_id: str) -> str | None:
-        """Fetch a contact by ID and return their phone number."""
+    def _get_contact_info(self, contact_id: str) -> tuple[str | None, str | None]:
+        """Fetch a contact by ID and return (phone, full_name)."""
         if not contact_id:
-            return None
+            return None, None
         r = self.client.get(f"{self.BASE}/contacts/{contact_id}",
                             headers=self._headers())
         if r.status_code != 200:
             logger.warning("GHL get contact %s → %s", contact_id, r.status_code)
-            return None
+            return None, None
         d = (r.json() or {}).get("contact") or r.json() or {}
-        return d.get("phone") or None
+        phone = d.get("phone") or None
+        name = (d.get("name")
+                or " ".join(filter(None, [d.get("firstName"), d.get("lastName")]))
+                or None)
+        return phone, name or None
+
+    def _get_contact_phone(self, contact_id: str) -> str | None:
+        phone, _ = self._get_contact_info(contact_id)
+        return phone
 
     def fetch_calendar_events_range(self, days_back: int = 120,
                                     days_ahead: int = 90) -> list[dict]:

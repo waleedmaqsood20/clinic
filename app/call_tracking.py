@@ -239,12 +239,13 @@ def sync_ghl_appointments(session_factory, calendar, days_back: float = 120) -> 
                 continue
 
             try:
-                phone_raw = calendar._get_contact_phone(contact_id) if contact_id else None
+                phone_raw, contact_name = (
+                    calendar._get_contact_info(contact_id) if contact_id else (None, None))
                 # Normalize to E.164 so phone_hash matches what _do_persist stored
                 # (Retell always sends E.164; GHL may return bare digits or formatted)
                 phone = calendar._to_e164(phone_raw) if phone_raw else None
             except Exception:
-                phone = None
+                phone, contact_name = None, None
 
             # GHL /calendars/events returns startTime as an ISO-8601 string
             # (e.g. "2026-07-10T09:00:00-04:00"), not epoch milliseconds.
@@ -311,12 +312,13 @@ def sync_ghl_appointments(session_factory, calendar, days_back: float = 120) -> 
                     start_utc=start_utc,
                     calcom_booking_uid=event_id,
                     caller_phone_enc=crypto.encrypt(phone),
-                    caller_name_enc=None,
+                    caller_name_enc=crypto.encrypt(contact_name) if contact_name else None,
                     reason_enc=None,
                     phone_hash=ph,
                     status=status,
                 )
-                patient = repository.upsert_patient(session, phone=phone)
+                patient = repository.upsert_patient(session, phone=phone,
+                                                    name=contact_name)
                 if patient:
                     appt.patient_id = patient.id
                 session.add(appt)
@@ -386,10 +388,11 @@ def handle_ghl_appointment_event(session_factory, calendar, event: dict) -> dict
                      ).astimezone(dt.timezone.utc)
 
     try:
-        phone_raw = calendar._get_contact_phone(contact_id) if contact_id else None
+        phone_raw, contact_name = (
+            calendar._get_contact_info(contact_id) if contact_id else (None, None))
         phone = calendar._to_e164(phone_raw) if phone_raw else None
     except Exception:
-        phone = None
+        phone, contact_name = None, None
 
     ph = crypto.phone_hash(phone) if phone else None
 
@@ -431,12 +434,13 @@ def handle_ghl_appointment_event(session_factory, calendar, event: dict) -> dict
             start_utc=start_utc,
             calcom_booking_uid=event_id,
             caller_phone_enc=crypto.encrypt(phone) if phone else None,
-            caller_name_enc=None,
+            caller_name_enc=crypto.encrypt(contact_name) if contact_name else None,
             reason_enc=None,
             phone_hash=ph,
             status=status,
         )
-        patient = repository.upsert_patient(session, phone=phone) if phone else None
+        patient = (repository.upsert_patient(session, phone=phone, name=contact_name)
+                   if phone else None)
         if patient:
             appt.patient_id = patient.id
         session.add(appt)
