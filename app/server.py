@@ -424,6 +424,42 @@ async def sms_inbound(request: Request):
                   f"appointment. — {CLINIC_PROFILE['name']}")
 
 
+@app.post("/ghl/webhook")
+async def ghl_webhook(request: Request, background: BackgroundTasks):
+    """Real-time GHL appointment sync.
+
+    Configure in GHL → Settings → Webhooks → URL: https://clinic-xprt.onrender.com/ghl/webhook
+    Events to subscribe: AppointmentCreate, AppointmentUpdate, AppointmentDelete
+
+    Optional: set GHL_WEBHOOK_SECRET in env to enable HMAC-SHA256 signature validation.
+    """
+    raw = await request.body()
+
+    secret = os.getenv("GHL_WEBHOOK_SECRET")
+    if secret:
+        import hmac, hashlib
+        sig = request.headers.get("x-wc-webhook-signature", "")
+        expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            logger.warning("[GHL-WEBHOOK] bad signature — rejected")
+            return JSONResponse(status_code=401, content={"error": "bad signature"})
+
+    body = json.loads(raw or b"{}")
+    event_type = body.get("type", "")
+    logger.info("[GHL-WEBHOOK] type=%s id=%s", event_type, body.get("id", "?"))
+
+    if event_type not in ("AppointmentCreate", "AppointmentUpdate", "AppointmentDelete"):
+        return JSONResponse(content={"received": True, "action": "ignored"})
+
+    if not isinstance(executor.calendar, GHLCalendar):
+        return JSONResponse(content={"received": True, "action": "ghl_not_configured"})
+
+    from .call_tracking import handle_ghl_appointment_event
+    background.add_task(handle_ghl_appointment_event, SessionLocal,
+                        executor.calendar, body)
+    return JSONResponse(content={"received": True})
+
+
 @app.post("/retell/webhook")
 async def retell_webhook(request: Request, background: BackgroundTasks):
     raw = await request.body()

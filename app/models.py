@@ -62,14 +62,33 @@ class DashboardUser(Base):
     still works as a legacy fallback so existing links don't break)."""
     __tablename__ = "dashboard_users"
 
-    id            = Column(Integer, primary_key=True)
-    clinic_id     = Column(Integer, index=True, default=1)
-    username      = Column(String, unique=True, index=True)
-    password_hash = Column(String)                 # pbkdf2: "salt$hexdigest"
-    role          = Column(String, default="staff")   # "admin" | "staff"
-    active        = Column(Boolean, default=True)
-    created_at    = Column(DateTime(timezone=True), default=_now_utc)
-    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    id                  = Column(Integer, primary_key=True)
+    clinic_id           = Column(Integer, index=True, default=1)
+    username            = Column(String, unique=True, index=True)
+    password_hash       = Column(String)                 # pbkdf2: "salt$hexdigest"
+    role                = Column(String, default="staff")   # "admin" | "staff"
+    active              = Column(Boolean, default=True)
+    created_at          = Column(DateTime(timezone=True), default=_now_utc)
+    last_login_at       = Column(DateTime(timezone=True), nullable=True)
+    password_changed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class LoginAttempt(Base):
+    """Persistent login-failure log for brute-force throttling.
+    Replaces the in-memory dict which reset on every Render restart."""
+    __tablename__ = "login_attempts"
+
+    id        = Column(Integer, primary_key=True)
+    key       = Column(String, index=True)       # client IP
+    failed_at = Column(DateTime(timezone=True), default=_now_utc)
+
+
+class RevokedToken(Base):
+    """JWT jti blacklist — enables true logout and post-password-change invalidation."""
+    __tablename__ = "revoked_tokens"
+
+    jti        = Column(String, primary_key=True)   # UUID from JWT jti claim
+    revoked_at = Column(DateTime(timezone=True), default=_now_utc)
 
 
 class WaitlistEntry(Base):

@@ -204,7 +204,7 @@ def sync_from_retell_api(session_factory, retell_api_key: str) -> dict:
     return {"synced": synced, "skipped": skipped}
 
 
-def sync_ghl_appointments(session_factory, calendar) -> dict:
+def sync_ghl_appointments(session_factory, calendar, days_back: float = 120) -> dict:
     """Pull GHL appointments (past 120 days + next 90) into local DB.
 
     Fixes the silent-failure window when appointments.status was missing:
@@ -219,7 +219,7 @@ def sync_ghl_appointments(session_factory, calendar) -> dict:
         return {"error": "GHL not configured"}
 
     try:
-        events = calendar.fetch_calendar_events_range(days_back=120, days_ahead=90)
+        events = calendar.fetch_calendar_events_range(days_back=days_back, days_ahead=90)
     except Exception as exc:
         logger.exception("[GHL-SYNC] fetch failed")
         return {"error": str(exc)}
@@ -339,6 +339,116 @@ def sync_ghl_appointments(session_factory, calendar) -> dict:
     return {"events_from_ghl": len(events), "appointments_created": created,
             "statuses_updated": updated, "calls_linked": linked,
             "skipped": skipped, "errors": errors}
+
+
+def handle_ghl_appointment_event(session_factory, calendar, event: dict) -> dict:
+    """Process a single GHL appointment webhook event in real-time.
+
+    Called by POST /ghl/webhook for AppointmentCreate, AppointmentUpdate,
+    and AppointmentDelete events. Same upsert logic as sync_ghl_appointments
+    but for one event so changes land in <1s instead of waiting for the next
+    scheduled sync pass.
+    """
+    import datetime as dt
+    from . import crypto, repository
+    from .models import Appointment, Call
+
+    event_type = event.get("type", "")
+    event_id = event.get("id")
+    if not event_id:
+        return {"ok": False, "reason": "no event id"}
+
+    # Deletion — mark cancelled locally
+    if event_type == "AppointmentDelete":
+        with session_factory() as session:
+            existing = repository.find_appointment_by_ghl_id(session, event_id)
+            if existing:
+                existing.status = "cancelled"
+                session.commit()
+                return {"ok": True, "action": "cancelled"}
+        return {"ok": True, "action": "not_found"}
+
+    contact_id = event.get("contactId")
+    status = (event.get("appointmentStatus") or "confirmed").lower()
+    start_raw = event.get("startTime")
+    service = event.get("title") or ""
+
+    if not start_raw:
+        return {"ok": False, "reason": "no startTime"}
+
+    # GHL sends ISO-8601 strings ("2026-07-20T10:00:00-04:00"), not epoch ms
+    if isinstance(start_raw, (int, float)):
+        start_utc = dt.datetime.fromtimestamp(start_raw / 1000, tz=dt.timezone.utc)
+    else:
+        parsed = dt.datetime.fromisoformat(str(start_raw))
+        start_utc = (parsed if parsed.tzinfo
+                     else parsed.replace(tzinfo=dt.timezone.utc)
+                     ).astimezone(dt.timezone.utc)
+
+    try:
+        phone_raw = calendar._get_contact_phone(contact_id) if contact_id else None
+        phone = calendar._to_e164(phone_raw) if phone_raw else None
+    except Exception:
+        phone = None
+
+    ph = crypto.phone_hash(phone) if phone else None
+
+    with session_factory() as session:
+        existing = repository.find_appointment_by_ghl_id(session, event_id)
+
+        if existing:
+            changed = False
+            if existing.status != status:
+                existing.status = status
+                changed = True
+            # Reschedule fires AppointmentUpdate with a new startTime
+            if existing.start_utc != start_utc:
+                existing.start_utc = start_utc
+                changed = True
+            if changed:
+                session.commit()
+            return {"ok": True, "action": "updated" if changed else "no_change"}
+
+        # New appointment — find the call that caused it
+        def _find_call(sess):
+            if not ph:
+                return None
+            taken = (sess.query(Appointment.call_id)
+                     .filter(Appointment.call_id.isnot(None))
+                     .subquery())
+            return (sess.query(Call)
+                    .filter(Call.phone_hash == ph)
+                    .filter(Call.ended_at <= start_utc)
+                    .filter(Call.ended_at >= start_utc - dt.timedelta(days=120))
+                    .filter(~Call.call_id.in_(taken))
+                    .order_by(Call.ended_at.desc())
+                    .first())
+
+        matching_call = _find_call(session)
+        appt = Appointment(
+            call_id=matching_call.call_id if matching_call else None,
+            service=service,
+            start_utc=start_utc,
+            calcom_booking_uid=event_id,
+            caller_phone_enc=crypto.encrypt(phone) if phone else None,
+            caller_name_enc=None,
+            reason_enc=None,
+            phone_hash=ph,
+            status=status,
+        )
+        patient = repository.upsert_patient(session, phone=phone) if phone else None
+        if patient:
+            appt.patient_id = patient.id
+        session.add(appt)
+
+        if matching_call and not matching_call.booked:
+            matching_call.booked = True
+            matching_call.outcome = "booked"
+            matching_call.intent = "booking"
+
+        session.commit()
+        return {"ok": True, "action": "created",
+                "call_linked": matching_call is not None}
 
 
 def _do_persist(session_factory, call: dict, analyzed: bool) -> None:

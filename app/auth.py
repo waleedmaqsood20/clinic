@@ -1,47 +1,48 @@
 """
-Dashboard authentication: per-user logins with signed session cookies.
+Dashboard authentication: JWT sessions + DB-persisted brute-force throttle.
 
-- Passwords: PBKDF2-HMAC-SHA256, 200k iterations, per-user salt (stdlib only).
-- Sessions: HMAC-signed token in an HttpOnly cookie, 12h expiry, no server
-  state (survives Render restarts).
-- Legacy: the shared DASHBOARD_TOKEN still authenticates (header or ?token=)
-  so existing bookmarks and cron jobs keep working. Token access has admin
-  rights — rotate it once real users are set up.
-- Bootstrap: at startup, if no users exist and DASHBOARD_ADMIN_USER +
-  DASHBOARD_ADMIN_PASSWORD are set, the first admin is created.
+JWT (HS256) stored in an HttpOnly cookie:
+  sub   = str(user_id)
+  role  = "admin" | "staff"
+  jti   = random UUID — stored in revoked_tokens on logout/password-change
+  iat   = issued-at
+  exp   = issued-at + SESSION_HOURS
+
+Throttle: LoginAttempt rows in DB (survives Render restarts; was in-memory).
+Legacy:   shared DASHBOARD_TOKEN (?token= / x-dashboard-token header) kept
+          for cron jobs / API scripts — rotate once real users exist.
 """
 from __future__ import annotations
-import base64
 import datetime as dt
 import hashlib
 import hmac
 import logging
 import os
-import secrets
-import time
+import uuid
+
+import jwt as _jwt
 
 logger = logging.getLogger("clinic")
 
 SESSION_COOKIE = "dash_session"
-SESSION_HOURS = 12
-_PBKDF2_ITERS = 200_000
-
-# naive in-memory login throttle: {key: (fail_count, first_fail_ts)}
-_attempts: dict[str, tuple[int, float]] = {}
-_MAX_ATTEMPTS = 8
-_WINDOW_S = 900
+SESSION_HOURS  = 12
+_PBKDF2_ITERS  = 200_000
+_ALGORITHM     = "HS256"
+_MAX_ATTEMPTS  = 8
+_WINDOW        = dt.timedelta(seconds=900)   # 15 min
 
 
-def _secret() -> bytes:
+def _secret() -> str:
     s = os.getenv("DASHBOARD_SECRET") or os.getenv("PHONE_HASH_HMAC_KEY") or ""
     if not s:
-        raise RuntimeError("Set DASHBOARD_SECRET (or PHONE_HASH_HMAC_KEY) for sessions")
-    return s.encode()
+        raise RuntimeError("Set DASHBOARD_SECRET (or PHONE_HASH_HMAC_KEY) for JWT signing")
+    return s
 
 
 # ---------- passwords ----------
 
 def hash_password(password: str) -> str:
+    import secrets
     salt = secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(),
                                  _PBKDF2_ITERS).hex()
@@ -58,56 +59,79 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(candidate, digest)
 
 
-# ---------- sessions ----------
+# ---------- JWT ----------
 
-def make_session(user_id: int, role: str) -> str:
-    expires = int(time.time()) + SESSION_HOURS * 3600
-    nonce = secrets.token_hex(8)
-    payload = f"{user_id}.{role}.{expires}.{nonce}"
-    sig = hmac.new(_secret(), payload.encode(), hashlib.sha256).hexdigest()
-    return base64.urlsafe_b64encode(f"{payload}.{sig}".encode()).decode()
+def make_token(user_id: int, role: str) -> str:
+    now = dt.datetime.now(dt.timezone.utc)
+    payload = {
+        "sub":  str(user_id),
+        "role": role,
+        "jti":  str(uuid.uuid4()),
+        "iat":  now,
+        "exp":  now + dt.timedelta(hours=SESSION_HOURS),
+    }
+    return _jwt.encode(payload, _secret(), algorithm=_ALGORITHM)
 
 
-def read_session(token: str | None) -> dict | None:
-    """Return {'user_id', 'role'} for a valid unexpired session, else None."""
+def verify_token(token: str | None, session) -> dict | None:
+    """Return {user_id, role, jti} for a valid non-revoked token, else None."""
     if not token:
         return None
     try:
-        raw = base64.urlsafe_b64decode(token.encode()).decode()
-        parts = raw.split(".")
-        if len(parts) != 5:
-            return None
-        user_id, role, expires, nonce, sig = parts
-        payload = f"{user_id}.{role}.{expires}.{nonce}"
-        expected = hmac.new(_secret(), payload.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, sig):
-            return None
-        if int(expires) < time.time():
-            return None
-        return {"user_id": int(user_id), "role": role}
-    except Exception:
+        payload = _jwt.decode(token, _secret(), algorithms=[_ALGORITHM])
+    except _jwt.PyJWTError:
         return None
+    jti = payload.get("jti")
+    if jti and _is_revoked(jti, session):
+        return None
+    return {
+        "user_id": int(payload["sub"]),
+        "role":    payload["role"],
+        "jti":     jti,
+    }
 
 
-# ---------- login throttle ----------
+def revoke_token(jti: str | None, session) -> None:
+    """Blacklist a jti so it can never be used again (logout / password change)."""
+    if not jti:
+        return
+    from .models import RevokedToken
+    # Prune expired entries (older than SESSION_HOURS + 1h buffer) lazily
+    cutoff = (dt.datetime.now(dt.timezone.utc)
+              - dt.timedelta(hours=SESSION_HOURS + 1))
+    session.query(RevokedToken).filter(RevokedToken.revoked_at < cutoff).delete()
+    if not _is_revoked(jti, session):
+        session.add(RevokedToken(jti=jti))
 
-def throttled(key: str) -> bool:
-    count, first = _attempts.get(key, (0, 0.0))
-    if time.time() - first > _WINDOW_S:
-        return False
+
+def _is_revoked(jti: str, session) -> bool:
+    from .models import RevokedToken
+    return session.get(RevokedToken, jti) is not None
+
+
+# ---------- DB throttle ----------
+
+def throttled(key: str, session) -> bool:
+    from .models import LoginAttempt
+    cutoff = dt.datetime.now(dt.timezone.utc) - _WINDOW
+    count = (session.query(LoginAttempt)
+             .filter(LoginAttempt.key == key,
+                     LoginAttempt.failed_at >= cutoff)
+             .count())
     return count >= _MAX_ATTEMPTS
 
 
-def record_failure(key: str) -> None:
-    count, first = _attempts.get(key, (0, 0.0))
-    if time.time() - first > _WINDOW_S:
-        _attempts[key] = (1, time.time())
-    else:
-        _attempts[key] = (count + 1, first)
+def record_failure(key: str, session) -> None:
+    from .models import LoginAttempt
+    # Prune rows older than 2× window to keep the table small
+    cutoff = dt.datetime.now(dt.timezone.utc) - _WINDOW * 2
+    session.query(LoginAttempt).filter(LoginAttempt.failed_at < cutoff).delete()
+    session.add(LoginAttempt(key=key))
 
 
-def clear_failures(key: str) -> None:
-    _attempts.pop(key, None)
+def clear_failures(key: str, session) -> None:
+    from .models import LoginAttempt
+    session.query(LoginAttempt).filter(LoginAttempt.key == key).delete()
 
 
 # ---------- user helpers ----------
@@ -119,7 +143,7 @@ def authenticate(session_db, username: str, password: str):
             .filter_by(username=(username or "").strip().lower(), active=True)
             .one_or_none())
     if user is None:
-        # burn comparable time so missing users aren't distinguishable
+        # Burn time so missing usernames aren't distinguishable from wrong passwords
         verify_password(password, "0" * 32 + "$" + "0" * 64)
         return None
     if not verify_password(password, user.password_hash):
@@ -142,6 +166,33 @@ def create_user(session_db, *, username: str, password: str,
                          role=role, clinic_id=clinic_id)
     session_db.add(user)
     return user
+
+
+def change_password(session_db, user_id: int,
+                    current_password: str, new_password: str) -> None:
+    """Logged-in user changes their own password. Raises ValueError on failure."""
+    from .models import DashboardUser
+    user = session_db.get(DashboardUser, user_id)
+    if user is None:
+        raise ValueError("user not found")
+    if not verify_password(current_password, user.password_hash):
+        raise ValueError("current password is incorrect")
+    if len(new_password or "") < 8:
+        raise ValueError("new password must be at least 8 characters")
+    user.password_hash       = hash_password(new_password)
+    user.password_changed_at = dt.datetime.now(dt.timezone.utc)
+
+
+def reset_password(session_db, user_id: int, new_password: str) -> None:
+    """Admin resets another user's password — no current password required."""
+    from .models import DashboardUser
+    user = session_db.get(DashboardUser, user_id)
+    if user is None:
+        raise ValueError("user not found")
+    if len(new_password or "") < 8:
+        raise ValueError("new password must be at least 8 characters")
+    user.password_hash       = hash_password(new_password)
+    user.password_changed_at = dt.datetime.now(dt.timezone.utc)
 
 
 def bootstrap_admin(session_factory) -> None:

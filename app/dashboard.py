@@ -53,17 +53,21 @@ _ATTENTION_KEYWORDS = ("call me back", "call back", "complaint", "unhappy",
 
 
 def _auth(request: Request) -> dict:
-    """Authenticate via session cookie (per-user logins) OR the legacy shared
-    DASHBOARD_TOKEN (header or ?token=). Returns {'role', 'user_id', 'actor'}.
-    Token access has admin rights — rotate it once real users exist."""
+    """Authenticate via JWT cookie (browser) or legacy DASHBOARD_TOKEN (cron/API).
+    Returns {'role', 'user_id', 'jti', 'actor'}."""
     from . import auth as auth_mod
-    try:
-        sess = auth_mod.read_session(request.cookies.get(auth_mod.SESSION_COOKIE))
-    except RuntimeError:
-        sess = None
-    if sess:
-        return {"role": sess["role"], "user_id": sess["user_id"],
-                "actor": f"user:{sess['user_id']}"}
+    cookie = request.cookies.get(auth_mod.SESSION_COOKIE)
+    if cookie:
+        try:
+            with session_factory() as _s:
+                sess = auth_mod.verify_token(cookie, _s)
+        except Exception:
+            sess = None
+        if sess:
+            return {"role": sess["role"], "user_id": sess["user_id"],
+                    "jti": sess["jti"],
+                    "actor": f"user:{sess['user_id']}"}
+    # Legacy token — kept for cron jobs and API scripts
     token = os.getenv("DASHBOARD_TOKEN")
     if not token:
         raise HTTPException(503, "Dashboard not configured — set DASHBOARD_TOKEN")
@@ -71,7 +75,7 @@ def _auth(request: Request) -> dict:
             or request.query_params.get("token") or "")
     if not hmac.compare_digest(sent, token):
         raise HTTPException(401, "unauthorized")
-    return {"role": "admin", "user_id": None, "actor": "token"}
+    return {"role": "admin", "user_id": None, "jti": None, "actor": "token"}
 
 
 def _require_admin(request: Request) -> dict:
@@ -375,20 +379,20 @@ def make_dashboard_router(session_factory, sms_provider=None,
         from . import auth as auth_mod
         body = await request.json()
         key = (request.client.host if request.client else "?")
-        if auth_mod.throttled(key):
-            raise HTTPException(429, "too many attempts — try again in 15 minutes")
         with session_factory() as session:
+            if auth_mod.throttled(key, session):
+                raise HTTPException(429, "too many attempts — try again in 15 minutes")
             user = auth_mod.authenticate(session, body.get("username", ""),
                                          body.get("password", ""))
             if user is None:
-                auth_mod.record_failure(key)
+                auth_mod.record_failure(key, session)
                 repository.write_audit(session, actor="anonymous",
                                        action="auth.login_failed", phi=False,
                                        detail={"username": str(body.get('username', ''))[:40]})
                 session.commit()
                 raise HTTPException(401, "invalid username or password")
-            auth_mod.clear_failures(key)
-            token = auth_mod.make_session(user.id, user.role)
+            auth_mod.clear_failures(key, session)
+            jwt_token = auth_mod.make_token(user.id, user.role)
             repository.write_audit(session, actor=f"user:{user.id}",
                                    action="auth.login", phi=False,
                                    detail={"username": user.username})
@@ -397,14 +401,23 @@ def make_dashboard_router(session_factory, sms_provider=None,
         resp = JSONResponse(content={"ok": True, "role": role,
                                      "username": username},
                             headers=_SEC_HEADERS)
-        resp.set_cookie(auth_mod.SESSION_COOKIE, token, httponly=True,
+        resp.set_cookie(auth_mod.SESSION_COOKIE, jwt_token, httponly=True,
                         samesite="lax", secure=True,
                         max_age=auth_mod.SESSION_HOURS * 3600, path="/")
         return resp
 
     @router.post("/api/logout")
-    async def api_logout():
+    async def api_logout(request: Request):
         from . import auth as auth_mod
+        try:
+            ctx = _auth(request)
+            jti = ctx.get("jti")
+            if jti:
+                with session_factory() as session:
+                    auth_mod.revoke_token(jti, session)
+                    session.commit()
+        except HTTPException:
+            pass
         resp = JSONResponse(content={"ok": True}, headers=_SEC_HEADERS)
         resp.delete_cookie(auth_mod.SESSION_COOKIE, path="/")
         return resp
@@ -457,6 +470,85 @@ def make_dashboard_router(session_factory, sms_provider=None,
                                    detail={"username": user.username})
             session.commit()
         return JSONResponse(content={"ok": True}, headers=_SEC_HEADERS)
+
+    @router.post("/api/users/{user_id}/enable")
+    async def api_enable_user(user_id: int, request: Request):
+        ctx = _require_admin(request)
+        from .models import DashboardUser
+        with session_factory() as session:
+            user = session.get(DashboardUser, user_id)
+            if user is None:
+                raise HTTPException(404, "user not found")
+            user.active = True
+            repository.write_audit(session, actor=ctx["actor"],
+                                   action="auth.user_enabled", phi=False,
+                                   detail={"username": user.username})
+            session.commit()
+        return JSONResponse(content={"ok": True}, headers=_SEC_HEADERS)
+
+    @router.post("/api/users/{user_id}/password")
+    async def api_reset_user_password(user_id: int, request: Request):
+        ctx = _require_admin(request)
+        from . import auth as auth_mod
+        body = await request.json()
+        with session_factory() as session:
+            try:
+                auth_mod.reset_password(session, user_id, body.get("password", ""))
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            repository.write_audit(session, actor=ctx["actor"],
+                                   action="auth.password_reset", phi=False,
+                                   detail={"user_id": user_id})
+            session.commit()
+        return JSONResponse(content={"ok": True}, headers=_SEC_HEADERS)
+
+    @router.post("/api/users/{user_id}/role")
+    async def api_change_user_role(user_id: int, request: Request):
+        ctx = _require_admin(request)
+        from .models import DashboardUser
+        body = await request.json()
+        new_role = body.get("role", "")
+        if new_role not in ("admin", "staff"):
+            raise HTTPException(400, "role must be admin or staff")
+        with session_factory() as session:
+            user = session.get(DashboardUser, user_id)
+            if user is None:
+                raise HTTPException(404, "user not found")
+            old_role = user.role
+            user.role = new_role
+            repository.write_audit(session, actor=ctx["actor"],
+                                   action="auth.role_changed", phi=False,
+                                   detail={"username": user.username,
+                                           "from": old_role, "to": new_role})
+            session.commit()
+        return JSONResponse(content={"ok": True}, headers=_SEC_HEADERS)
+
+    @router.post("/api/me/password")
+    async def api_change_my_password(request: Request):
+        from . import auth as auth_mod
+        ctx = _auth(request)
+        if ctx["user_id"] is None:
+            raise HTTPException(403, "log in with a user account to change your password")
+        body = await request.json()
+        with session_factory() as session:
+            try:
+                auth_mod.change_password(session, ctx["user_id"],
+                                         body.get("current_password", ""),
+                                         body.get("new_password", ""))
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            repository.write_audit(session, actor=ctx["actor"],
+                                   action="auth.password_changed", phi=False)
+            session.commit()
+        # Revoke current JWT so they must log in again with the new password
+        jti = ctx.get("jti")
+        if jti:
+            with session_factory() as session:
+                auth_mod.revoke_token(jti, session)
+                session.commit()
+        resp = JSONResponse(content={"ok": True}, headers=_SEC_HEADERS)
+        resp.delete_cookie(auth_mod.SESSION_COOKIE, path="/")
+        return resp
 
     # ---------- waitlist ----------
 
@@ -762,13 +854,11 @@ def make_dashboard_router(session_factory, sms_provider=None,
         try:
             _auth(request)
         except HTTPException as e:
-            if e.status_code == 401:
+            if e.status_code in (401, 503):
                 return RedirectResponse("/login", status_code=302,
                                         headers=_SEC_HEADERS)
             raise
-        token = request.query_params.get("token", "")
-        html = _DASHBOARD_HTML.replace("__TOKEN__", _js_escape(token))
-        return HTMLResponse(content=html,
+        return HTMLResponse(content=_DASHBOARD_HTML,
                             headers={**_SEC_HEADERS,
                                      "Content-Security-Policy": _CSP})
 
@@ -932,6 +1022,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
            opacity:0;transition:opacity .3s;pointer-events:none;max-width:340px;
            white-space:pre-wrap}
     .toast.show{opacity:.95}
+    .kpi-trend{font-size:.7rem;margin-top:.35rem;font-weight:500}
+    .trend-up{color:#34c759}.trend-down{color:#ff3b30}.trend-flat{color:#aeaeb2}
   </style>
 </head>
 <body>
@@ -941,12 +1033,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="sub">Voice AI — Call Dashboard</div>
   </div>
   <span class="spacer"></span>
+  <span id="refresh-ts" style="font-size:.72rem;color:#6e6e73;margin-right:.25rem"></span>
   <button class="btn btn-primary" onclick="loadAll()">Refresh</button>
   <button class="btn" id="sync-btn" onclick="syncRetell()">Sync History</button>
   <button class="btn" id="sync-ghl-btn" onclick="syncGhlAppts()" title="Pull GHL appointments into local DB and fix booking stats">Sync GHL Appts</button>
   <button class="btn" onclick="exportCsv()">Export CSV</button>
   <button class="btn" id="digest-btn" onclick="sendDigest()">Send Digest</button>
   <button class="btn" id="remind-btn" onclick="sendReminders()">Send Reminders</button>
+  <button class="btn" onclick="openCpModal()" style="background:#f5f5f7;color:#1d1d1f">Change Password</button>
   <button class="btn" onclick="logout()">Logout</button>
 </header>
 
@@ -975,16 +1069,22 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="tabs">
-    <button class="tab active" id="tab-calls" onclick="showTab('calls')">Calls</button>
+    <button class="tab active" id="tab-today" onclick="showTab('today')">Today</button>
+    <button class="tab" id="tab-calls" onclick="showTab('calls')">Calls</button>
     <button class="tab" id="tab-appts" onclick="showTab('appts')">Upcoming Appointments</button>
     <button class="tab" id="tab-patients" onclick="showTab('patients');loadPatients()">Patients</button>
     <button class="tab" id="tab-waitlist" onclick="showTab('waitlist');loadWaitlist()">Waitlist <span id="wl-count"></span></button>
     <button class="tab" id="tab-analytics" onclick="showTab('analytics');loadAnalytics()">Analytics</button>
-    <button class="tab" id="tab-issues" onclick="showTab('issues')">Issues <span id="issue-count"></span></button>
+    <button class="tab" id="tab-issues" onclick="showTab('issues')">Alerts <span id="issue-count"></span></button>
     <button class="tab" id="tab-admin" onclick="showTab('admin');loadUsers()">Admin</button>
   </div>
 
-  <div class="section" id="sec-calls">
+  <div class="section" id="sec-today">
+    <div class="section-hdr">Today's Overview</div>
+    <div id="today-content"><div class="loading">Loading…</div></div>
+  </div>
+
+  <div class="section" id="sec-calls" style="display:none">
     <div class="section-hdr">Call Log
       <span class="filters">
         <select id="f-outcome" onchange="OFFSET=0;loadCalls()">
@@ -1057,6 +1157,24 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div id="users"><div class="loading">Loading…</div></div>
   </div>
 
+  <!-- Change Password modal -->
+  <div id="cpModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:#fff;border-radius:14px;padding:1.8rem;width:320px;box-shadow:0 8px 32px rgba(0,0,0,.18)">
+      <h3 style="font-size:.95rem;margin-bottom:1.1rem">Change Password</h3>
+      <label style="font-size:.7rem;color:#6e6e73;text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:.25rem">Current password</label>
+      <input type="password" id="cp-cur" style="width:100%;padding:.55rem .7rem;border:1px solid #e5e5ea;border-radius:8px;font-size:.9rem;margin-bottom:.8rem">
+      <label style="font-size:.7rem;color:#6e6e73;text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:.25rem">New password (8+ characters)</label>
+      <input type="password" id="cp-new" style="width:100%;padding:.55rem .7rem;border:1px solid #e5e5ea;border-radius:8px;font-size:.9rem;margin-bottom:.8rem">
+      <label style="font-size:.7rem;color:#6e6e73;text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:.25rem">Confirm new password</label>
+      <input type="password" id="cp-cnf" style="width:100%;padding:.55rem .7rem;border:1px solid #e5e5ea;border-radius:8px;font-size:.9rem;margin-bottom:1rem">
+      <div id="cp-err" style="color:#c0392b;font-size:.8rem;min-height:1rem;margin-bottom:.7rem"></div>
+      <div style="display:flex;gap:.6rem">
+        <button class="btn" onclick="submitChangePassword()" style="flex:1">Save</button>
+        <button class="btn" onclick="closeCpModal()" style="flex:1;background:#f5f5f7;color:#1d1d1f">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <div class="section" id="sec-issues" style="display:none">
     <div class="section-hdr">Failed Webhook Events (dead-letter queue)</div>
     <div id="issues"><div class="loading">Loading…</div></div>
@@ -1065,7 +1183,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="toast" id="toast"></div>
 
 <script>
-const TOKEN = '__TOKEN__';
 const LIMIT = 50;
 let OFFSET = 0, TOTAL = 0, CALL_ROWS = [];
 
@@ -1079,12 +1196,12 @@ function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t
 function showError(id,msg){document.getElementById(id).innerHTML='<div class="empty">'+esc(msg)+'</div>'}
 
 async function getJSON(url){
-  const r = await fetch(url);
-  if(r.status === 401) throw new Error('Invalid or expired dashboard token — reload the page with a valid ?token=');
+  const r = await fetch(url, {credentials:'same-origin'});
+  if(r.status === 401){window.location='/login';throw new Error('Session expired — redirecting to login');}
   if(!r.ok) throw new Error('Request failed (HTTP ' + r.status + ')');
   return r.json();
 }
-function tok(extra){const p=new URLSearchParams(extra||{});if(TOKEN)p.set('token',TOKEN);return p.toString()}
+function tok(extra){return new URLSearchParams(extra||{}).toString()}
 function filterParams(){
   const p={};
   const o=document.getElementById('f-outcome').value; if(o)p.outcome=o;
@@ -1094,15 +1211,16 @@ function filterParams(){
 }
 
 function showTab(name){
-  for(const t of ['calls','appts','patients','waitlist','analytics','issues','admin']){
+  for(const t of ['today','calls','appts','patients','waitlist','analytics','issues','admin']){
     document.getElementById('sec-'+t).style.display = t===name?'':'none';
     document.getElementById('tab-'+t).classList.toggle('active', t===name);
   }
   document.getElementById('sec-patient-profile').style.display='none';
   if(name==='patients')document.getElementById('sec-patients').style.display='';
+  if(name==='today')loadToday();
 }
 async function logout(){
-  try{await fetch('/api/logout',{method:'POST'})}catch(e){}
+  try{await fetch('/api/logout',{method:'POST',credentials:'same-origin'})}catch(e){}
   window.location='/login';
 }
 function closeProfile(){
@@ -1115,11 +1233,23 @@ async function loadKpis(){
   try{
     const d=await getJSON('/api/kpis?'+tok());
     const rate=d.booking_rate_pct!=null?d.booking_rate_pct+'%':'—';
+    const tr=d.daily_trend||[];
+    const tw=tr.slice(-7),pw=tr.slice(-14,-7);
+    const twC=tw.reduce((s,x)=>s+x.calls,0),pwC=pw.reduce((s,x)=>s+x.calls,0);
+    const twB=tw.reduce((s,x)=>s+x.booked,0),pwB=pw.reduce((s,x)=>s+x.booked,0);
+    function trendBadge(cur,prev){
+      if(!prev||!cur)return'';
+      const delta=cur-prev,pct=Math.round(Math.abs(delta)/prev*100);
+      if(pct<5)return`<div class="kpi-trend trend-flat">→ flat vs last wk</div>`;
+      return delta>0
+        ?`<div class="kpi-trend trend-up">↑${pct}% vs last wk</div>`
+        :`<div class="kpi-trend trend-down">↓${pct}% vs last wk</div>`;
+    }
     document.getElementById('kpis').innerHTML=`
       <div class="kpi"><div class="kpi-val">${esc(d.calls_today)}</div><div class="kpi-lbl">Calls Today</div></div>
-      <div class="kpi"><div class="kpi-val">${esc(d.calls_this_week)}</div><div class="kpi-lbl">This Week</div></div>
+      <div class="kpi"><div class="kpi-val">${esc(d.calls_this_week)}</div><div class="kpi-lbl">This Week</div>${trendBadge(twC,pwC)}</div>
       <div class="kpi"><div class="kpi-val">${esc(d.total_calls)}</div><div class="kpi-lbl">All Time</div></div>
-      <div class="kpi"><div class="kpi-val">${rate}</div><div class="kpi-lbl">Booking Rate</div></div>
+      <div class="kpi"><div class="kpi-val">${rate}</div><div class="kpi-lbl">Booking Rate</div>${trendBadge(twB,pwB)}</div>
       <div class="kpi"><div class="kpi-val">${dur(d.avg_duration_seconds)}</div><div class="kpi-lbl">Avg Duration</div></div>
       <div class="kpi"><div class="kpi-val" style="color:#5b21b6">${esc(d.new_patients_this_month??'—')}</div><div class="kpi-lbl">New Patients (Month)</div></div>
       <div class="kpi"><div class="kpi-val" style="color:#065f46">$${(d.revenue_this_month??0).toLocaleString()}</div><div class="kpi-lbl">Est. Revenue (Month)</div></div>
@@ -1490,14 +1620,20 @@ async function removeWaitlist(id){
 // ---- Admin users ----
 async function loadUsers(){
   try{
-    const rows=await getJSON('/api/users?'+tok());
+    const rows=await getJSON('/api/users');
     if(!rows.length){document.getElementById('users').innerHTML='<div class="empty">No users yet — add one above, or set DASHBOARD_ADMIN_USER / DASHBOARD_ADMIN_PASSWORD env vars for the first admin.</div>';return}
-    let t=`<table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last Login</th><th></th></tr></thead><tbody>`;
+    let t=`<table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last Login</th><th>Actions</th></tr></thead><tbody>`;
     for(const u of rows){
-      t+=`<tr><td>${esc(u.username)}</td><td>${esc(u.role)}</td>
-        <td>${u.active?'<span class="badge b-booked">active</span>':'<span class="badge b-other">disabled</span>'}</td>
-        <td style="white-space:nowrap">${ts(u.last_login_at)}</td>
-        <td>${u.active?`<button class="btn" onclick="disableUser(${u.id})">Disable</button>`:''}</td></tr>`;
+      const statusBadge=u.active?'<span class="badge b-booked">active</span>':'<span class="badge b-other">disabled</span>';
+      const roleOpts=['admin','staff'].map(r=>`<option value="${r}"${r===u.role?' selected':''}>${r}</option>`).join('');
+      const actions=u.active
+        ?`<button class="btn" style="font-size:.7rem;padding:.25rem .55rem" onclick="disableUser(${u.id})">Disable</button>
+           <button class="btn" style="font-size:.7rem;padding:.25rem .55rem;background:#f5f5f7;color:#1d1d1f" onclick="promptResetPassword(${u.id})">Reset pwd</button>
+           <select onchange="changeRole(${u.id},this.value)" style="font-size:.7rem;padding:.25rem .4rem;border:1px solid #e5e5ea;border-radius:6px">${roleOpts}</select>`
+        :`<button class="btn" style="font-size:.7rem;padding:.25rem .55rem;background:#34c759;color:#fff" onclick="enableUser(${u.id})">Enable</button>
+           <button class="btn" style="font-size:.7rem;padding:.25rem .55rem;background:#f5f5f7;color:#1d1d1f" onclick="promptResetPassword(${u.id})">Reset pwd</button>`;
+      t+=`<tr><td>${esc(u.username)}</td><td>${esc(u.role)}</td><td>${statusBadge}</td>
+        <td style="white-space:nowrap">${ts(u.last_login_at)}</td><td style="white-space:nowrap;display:flex;gap:.35rem;align-items:center">${actions}</td></tr>`;
     }
     document.getElementById('users').innerHTML=t+'</tbody></table>';
   }catch(e){
@@ -1506,7 +1642,7 @@ async function loadUsers(){
 }
 async function createUser(){
   try{
-    const r=await fetch('/api/users?'+tok(),{method:'POST',
+    const r=await fetch('/api/users',{method:'POST',credentials:'same-origin',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({username:document.getElementById('nu-user').value,
                            password:document.getElementById('nu-pass').value,
@@ -1521,10 +1657,66 @@ async function createUser(){
 async function disableUser(id){
   if(!confirm('Disable this user?'))return;
   try{
-    const r=await fetch(`/api/users/${id}/disable?`+tok(),{method:'POST'});
+    const r=await fetch(`/api/users/${id}/disable`,{method:'POST',credentials:'same-origin'});
     if(!r.ok)throw new Error('HTTP '+r.status);
-    loadUsers();
+    toast('User disabled');loadUsers();
   }catch(e){toast('Disable failed: '+e.message)}
+}
+async function enableUser(id){
+  try{
+    const r=await fetch(`/api/users/${id}/enable`,{method:'POST',credentials:'same-origin'});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    toast('User re-enabled');loadUsers();
+  }catch(e){toast('Enable failed: '+e.message)}
+}
+async function promptResetPassword(id){
+  const pwd=prompt('Set new password for this user (8+ characters):');
+  if(!pwd)return;
+  try{
+    const r=await fetch(`/api/users/${id}/password`,{method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||('HTTP '+r.status));
+    toast('Password reset — user must log in again');
+  }catch(e){toast('Reset failed: '+e.message)}
+}
+async function changeRole(id,role){
+  try{
+    const r=await fetch(`/api/users/${id}/role`,{method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({role})});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||('HTTP '+r.status));
+    toast('Role updated to '+role);loadUsers();
+  }catch(e){toast('Role change failed: '+e.message);loadUsers();}
+}
+// ---- Change Password modal ----
+function openCpModal(){
+  document.getElementById('cp-cur').value='';
+  document.getElementById('cp-new').value='';
+  document.getElementById('cp-cnf').value='';
+  document.getElementById('cp-err').textContent='';
+  const m=document.getElementById('cpModal');
+  m.style.display='flex';
+}
+function closeCpModal(){document.getElementById('cpModal').style.display='none';}
+async function submitChangePassword(){
+  const cur=document.getElementById('cp-cur').value;
+  const nw=document.getElementById('cp-new').value;
+  const cnf=document.getElementById('cp-cnf').value;
+  const errEl=document.getElementById('cp-err');
+  if(nw!==cnf){errEl.textContent='New passwords do not match';return;}
+  if(nw.length<8){errEl.textContent='New password must be at least 8 characters';return;}
+  errEl.textContent='';
+  try{
+    const r=await fetch('/api/me/password',{method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({current_password:cur,new_password:nw})});
+    const d=await r.json();
+    if(!r.ok){errEl.textContent=d.detail||('Error '+r.status);return;}
+    toast('Password changed — please log in again');
+    closeCpModal();
+    setTimeout(()=>window.location='/login',1500);
+  }catch(e){errEl.textContent=e.message;}
 }
 
 // ---- Analytics ----
@@ -1611,8 +1803,89 @@ async function sendReminders(){
   btn.textContent='Send Reminders';btn.disabled=false;
 }
 
-function loadAll(){loadKpis();loadCalls();loadAppts();loadIssues();loadWaitlist()}
+// ---- Today tab ----
+async function loadToday(){
+  try{
+    const [kpis,appts,callsData]=await Promise.all([
+      getJSON('/api/kpis?'+tok()),
+      getJSON('/api/appointments?'+tok()),
+      getJSON('/api/calls?'+tok({limit:100,offset:0}))
+    ]);
+    const tr=kpis.daily_trend||[];
+    const todayEntry=tr[tr.length-1]||{};
+    const bookedToday=todayEntry.booked||0;
+    const callsToday=kpis.calls_today||0;
+    const convRate=callsToday?Math.round(bookedToday/callsToday*100):0;
+
+    // Tomorrow in browser local time — close enough for same-city clinic staff
+    const tmr=new Date();tmr.setDate(tmr.getDate()+1);
+    const tmrStr=tmr.toLocaleDateString('en-CA'); // YYYY-MM-DD
+    const tmrAppts=appts.filter(a=>a.start_local&&a.start_local.slice(0,10)===tmrStr);
+    const tmrLabel=tmr.toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'});
+
+    const flagged=(callsData.rows||[]).filter(r=>r.attention).slice(0,5);
+
+    let h=`<div style="padding:1rem 1.5rem">
+    <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));margin-bottom:1.5rem">
+      <div class="kpi"><div class="kpi-val">${callsToday}</div><div class="kpi-lbl">Calls Today</div></div>
+      <div class="kpi"><div class="kpi-val" style="color:#34c759">${bookedToday}</div><div class="kpi-lbl">Booked Today</div></div>
+      <div class="kpi"><div class="kpi-val">${convRate}%</div><div class="kpi-lbl">Conversion</div></div>
+      <div class="kpi"><div class="kpi-val" style="color:${flagged.length?'#ff9500':'#34c759'}">${flagged.length}</div><div class="kpi-lbl">Needs Attention</div></div>
+    </div>
+    <div class="kpi-lbl" style="margin-bottom:.6rem">Tomorrow — ${esc(tmrLabel)} &nbsp;·&nbsp; ${tmrAppts.length} appointment${tmrAppts.length!==1?'s':''}</div>`;
+
+    if(tmrAppts.length){
+      h+=`<table><thead><tr><th>Time</th><th>Patient</th><th>Service</th><th>Status</th><th>Reminder</th></tr></thead><tbody>`;
+      for(const a of tmrAppts){
+        const t=a.start_local?new Date(a.start_local).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}):'—';
+        const confirmed=a.status==='confirmed';
+        h+=`<tr>
+          <td style="white-space:nowrap;font-weight:500">${esc(t)}</td>
+          <td>${esc(a.name)}</td><td>${esc(a.service||'—')}</td>
+          <td><span class="badge b-${confirmed?'confirmed':'other'}">${esc(a.status||'—')}</span></td>
+          <td>${a.reminder_sent?'<span style="color:#34c759;font-size:.8rem">✓ sent</span>':'<span class="no-sum">pending</span>'}</td>
+        </tr>`;
+      }
+      h+=`</tbody></table>`;
+    }else{
+      h+=`<div style="padding:.75rem 0;color:#aeaeb2;font-size:.85rem">No appointments scheduled for tomorrow.</div>`;
+    }
+
+    if(flagged.length){
+      h+=`<div class="kpi-lbl" style="margin:1.5rem 0 .6rem">Needs Attention</div>
+      <table><thead><tr><th>Time</th><th>Phone</th><th>Outcome</th><th>Reason</th></tr></thead><tbody>`;
+      for(const r of flagged){
+        h+=`<tr>
+          <td style="white-space:nowrap">${ts(r.ended_at)}</td>
+          <td>${esc(r.phone)}</td><td>${badge(r.outcome)}</td>
+          <td style="font-size:.75rem;color:#991b1b">${esc((r.attention_reasons||[]).join(' · '))}</td>
+        </tr>`;
+      }
+      h+=`</tbody></table>`;
+    }else if(callsToday>0){
+      h+=`<div style="margin-top:1.25rem;padding:.75rem 1rem;background:#f0fdf4;border-radius:8px;font-size:.85rem;color:#065f46">All clear — no calls need attention today.</div>`;
+    }
+    h+=`</div>`;
+    document.getElementById('today-content').innerHTML=h;
+  }catch(e){
+    document.getElementById('today-content').innerHTML='<div class="empty">'+esc(e.message)+'</div>';
+  }
+}
+
+let _lastRefresh=0;
+function loadAll(){
+  loadKpis();loadCalls();loadAppts();loadIssues();loadWaitlist();
+  if(document.getElementById('tab-today').classList.contains('active'))loadToday();
+  _lastRefresh=Date.now();
+}
 loadAll();
+setInterval(loadAll,60000);
+setInterval(()=>{
+  if(!_lastRefresh)return;
+  const el=document.getElementById('refresh-ts');if(!el)return;
+  const s=Math.round((Date.now()-_lastRefresh)/1000);
+  el.textContent=s<5?'just updated':`updated ${s}s ago`;
+},1000);
 </script>
 </body>
 </html>"""

@@ -37,6 +37,8 @@ _COLUMN_MIGRATIONS = [
     ("appointments", "status", "VARCHAR DEFAULT 'confirmed'", "VARCHAR DEFAULT 'confirmed'"),
     ("calls", "patient_id", "INTEGER", "INTEGER"),
     ("calls", "clinic_id", "INTEGER DEFAULT 1", "INTEGER DEFAULT 1"),
+    # JWT auth (Jul 2026)
+    ("dashboard_users", "password_changed_at", "DATETIME", "TIMESTAMPTZ"),
 ]
 
 # appointments.patient_id and appointments.status were added Jul 2026 alongside
