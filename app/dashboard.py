@@ -418,7 +418,8 @@ def make_dashboard_router(session_factory, sms_provider=None,
         except HTTPException:
             pass
         resp = JSONResponse(content={"ok": True}, headers=_SEC_HEADERS)
-        resp.delete_cookie(auth_mod.SESSION_COOKIE, path="/")
+        resp.delete_cookie(auth_mod.SESSION_COOKIE, path="/",
+                           httponly=True, samesite="lax", secure=True)
         return resp
 
     @router.get("/api/users")
@@ -546,7 +547,8 @@ def make_dashboard_router(session_factory, sms_provider=None,
                 auth_mod.revoke_token(jti, session)
                 session.commit()
         resp = JSONResponse(content={"ok": True}, headers=_SEC_HEADERS)
-        resp.delete_cookie(auth_mod.SESSION_COOKIE, path="/")
+        resp.delete_cookie(auth_mod.SESSION_COOKIE, path="/",
+                           httponly=True, samesite="lax", secure=True)
         return resp
 
     # ---------- waitlist ----------
