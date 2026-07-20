@@ -57,6 +57,11 @@ class FakeGHL:
                  "startTime": "2026-07-06T09:00:00-04:00",
                  "title": "cleaning - Test User"}
             ]})
+        if "/contacts/contact_123" in url:
+            return FakeResp(200, {"contact": {
+                "id": "contact_123", "phone": "+13175559999",
+                "firstName": "Ali", "lastName": "Khan",
+            }})
         return FakeResp(200, {"2026-06-16": {"slots":
             ["2026-06-16T10:00:00-04:00", "2026-06-16T10:30:00-04:00"]}, "traceId": "x"})
     def post(self, url, headers=None, json=None):
@@ -198,6 +203,47 @@ def main():
     check("GHL reschedule uses PUT with confirmed status",
           any(c[0] == "PUT" and c[3].get("appointmentStatus") == "confirmed"
               for c in ghl4.client.calls))
+
+    # 10) _get_contact_info extracts (phone, name) from GHL response
+    ghl5 = GHLCalendar(token="tok", location_id="loc", calendar_id="cal",
+                       timezone="America/Indiana/Indianapolis", client=FakeGHL())
+    phone_got, name_got = ghl5._get_contact_info("contact_123")
+    check("_get_contact_info returns phone", phone_got == "+13175559999")
+    check("_get_contact_info returns full name (firstName + lastName)", name_got == "Ali Khan")
+    phone_none, name_none = ghl5._get_contact_info(None)
+    check("_get_contact_info handles None contact_id", phone_none is None and name_none is None)
+
+    # 11) sync_ghl_appointments stores contact name in appointment + patient registry
+    import tempfile
+    _syncdb = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker as _sm
+    from app import db as dbmod2
+    from app.models import Appointment as Appt2, Patient as Pat2
+    _eng = create_engine(f"sqlite:///{_syncdb}",
+                         connect_args={"check_same_thread": False})
+    _sf = _sm(_eng, autocommit=False, autoflush=False, expire_on_commit=False)
+    dbmod2.init_db(_eng)
+
+    ghl6 = GHLCalendar(token="tok", location_id="loc", calendar_id="cal",
+                       timezone="America/Indiana/Indianapolis", client=FakeGHL())
+    from app.call_tracking import sync_ghl_appointments
+    sync_result = sync_ghl_appointments(_sf, ghl6)
+    check("sync_ghl_appointments created 1 appointment", sync_result.get("appointments_created") == 1)
+
+    with _sf() as _s:
+        synced_appt = _s.query(Appt2).first()
+        check("Synced appointment has caller_name_enc set", synced_appt is not None and synced_appt.caller_name_enc is not None)
+        if synced_appt and synced_appt.caller_name_enc:
+            check("Synced appointment name decrypts to 'Ali Khan'",
+                  crypto.decrypt(synced_appt.caller_name_enc) == "Ali Khan")
+        pat = _s.query(Pat2).first()
+        check("Patient registry created for synced contact", pat is not None)
+        if pat and pat.name_enc:
+            check("Patient registry name decrypts to 'Ali Khan'",
+                  crypto.decrypt(pat.name_enc) == "Ali Khan")
+        else:
+            check("Patient registry name decrypts to 'Ali Khan'", False)
 
     print("-" * 60)
     print("RESULT:", "ALL CHECKS PASSED ✅" if ok else "SOMETHING FAILED ❌")
