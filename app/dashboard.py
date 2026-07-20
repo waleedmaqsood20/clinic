@@ -52,38 +52,6 @@ _ATTENTION_KEYWORDS = ("call me back", "call back", "complaint", "unhappy",
                        "manager", "billing issue")
 
 
-def _auth(request: Request) -> dict:
-    """Authenticate via JWT cookie (browser) or legacy DASHBOARD_TOKEN (cron/API).
-    Returns {'role', 'user_id', 'jti', 'actor'}."""
-    from . import auth as auth_mod
-    cookie = request.cookies.get(auth_mod.SESSION_COOKIE)
-    if cookie:
-        try:
-            with session_factory() as _s:
-                sess = auth_mod.verify_token(cookie, _s)
-        except Exception:
-            sess = None
-        if sess:
-            return {"role": sess["role"], "user_id": sess["user_id"],
-                    "jti": sess["jti"],
-                    "actor": f"user:{sess['user_id']}"}
-    # Legacy token — kept for cron jobs and API scripts
-    token = os.getenv("DASHBOARD_TOKEN")
-    if not token:
-        raise HTTPException(503, "Dashboard not configured — set DASHBOARD_TOKEN")
-    sent = (request.headers.get("x-dashboard-token")
-            or request.query_params.get("token") or "")
-    if not hmac.compare_digest(sent, token):
-        raise HTTPException(401, "unauthorized")
-    return {"role": "admin", "user_id": None, "jti": None, "actor": "token"}
-
-
-def _require_admin(request: Request) -> dict:
-    ctx = _auth(request)
-    if ctx["role"] != "admin":
-        raise HTTPException(403, "admin only")
-    return ctx
-
 
 def _clinic_tz() -> ZoneInfo:
     return ZoneInfo(os.getenv("CLINIC_TZ", "America/Indiana/Indianapolis"))
@@ -174,6 +142,37 @@ def _call_filters(request: Request) -> dict:
 def make_dashboard_router(session_factory, sms_provider=None,
                           calendar=None) -> APIRouter:
     router = APIRouter()
+
+    def _auth(request: Request) -> dict:
+        """Authenticate via JWT cookie (browser) or legacy DASHBOARD_TOKEN (cron/API).
+        Returns {'role', 'user_id', 'jti', 'actor'}."""
+        from . import auth as auth_mod
+        cookie = request.cookies.get(auth_mod.SESSION_COOKIE)
+        if cookie:
+            try:
+                with session_factory() as _s:
+                    sess = auth_mod.verify_token(cookie, _s)
+            except Exception:
+                sess = None
+            if sess:
+                return {"role": sess["role"], "user_id": sess["user_id"],
+                        "jti": sess["jti"],
+                        "actor": f"user:{sess['user_id']}"}
+        # Legacy token — kept for cron jobs and API scripts
+        token = os.getenv("DASHBOARD_TOKEN")
+        if not token:
+            raise HTTPException(503, "Dashboard not configured — set DASHBOARD_TOKEN")
+        sent = (request.headers.get("x-dashboard-token")
+                or request.query_params.get("token") or "")
+        if not hmac.compare_digest(sent, token):
+            raise HTTPException(401, "unauthorized")
+        return {"role": "admin", "user_id": None, "jti": None, "actor": "token"}
+
+    def _require_admin(request: Request) -> dict:
+        ctx = _auth(request)
+        if ctx["role"] != "admin":
+            raise HTTPException(403, "admin only")
+        return ctx
 
     @router.post("/api/sync-retell")
     async def api_sync_retell(request: Request):
@@ -910,16 +909,25 @@ _LOGIN_HTML = """<!DOCTYPE html>
 <script>
 document.getElementById('f').addEventListener('submit', async (e)=>{
   e.preventDefault();
-  const err=document.getElementById('err');err.textContent='';
+  const err=document.getElementById('err');
+  const btn=document.querySelector('button');
+  err.textContent='';
+  btn.disabled=true;btn.textContent='Signing in…';
   try{
-    const r=await fetch('/api/login',{method:'POST',
+    const r=await fetch('/api/login',{method:'POST',credentials:'same-origin',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({username:document.getElementById('u').value,
                            password:document.getElementById('p').value})});
-    if(!r.ok){const d=await r.json().catch(()=>({}));
-      err.textContent=d.detail||('Login failed ('+r.status+')');return}
+    if(!r.ok){
+      const d=await r.json().catch(()=>({}));
+      err.textContent=d.detail||('Login failed (HTTP '+r.status+')');
+      btn.disabled=false;btn.textContent='Sign in';return;
+    }
     window.location='/dashboard';
-  }catch(ex){err.textContent='Network error'}
+  }catch(ex){
+    err.textContent='Network error — check your connection';
+    btn.disabled=false;btn.textContent='Sign in';
+  }
 });
 </script>
 </body>
